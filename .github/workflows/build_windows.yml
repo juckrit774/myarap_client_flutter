@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -36,36 +36,27 @@ jobs:
         run: iscc installer\setup.iss
 
       - name: Upload EXE installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: MyARAP_Setup_EXE
           path: installer/installer_output/MyARAP_Setup.exe
           retention-days: 30
 
-      # ── MSI Installer (WiX v3) ───────────────────────────────────────────
-      - name: Install WiX v3
-        shell: powershell
-        run: |
-          choco install wixtoolset --version 3.11.2.4516 -y --force
-          echo "WiX installed"
+      # ── MSI Installer (WiX v4) ───────────────────────────────────────────
+      - name: Install WiX v4
+        run: dotnet tool install --global wix
+
+      - name: Add WiX UI extension
+        run: wix extension add WixToolset.UI.wixext --global
 
       - name: Build MSI
         shell: powershell
         run: |
-          $wixDir = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset*" -Directory | Select-Object -First 1
-          if (-not $wixDir) { Write-Error "WiX not found"; exit 1 }
-          $wixPath = Join-Path $wixDir.FullName "bin"
-          Write-Host "Using WiX at: $wixPath"
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
-          & "$wixPath\heat.exe" dir build\windows\x64\runner\Release -cg AppFiles -dr INSTALLFOLDER -gg -scom -sreg -sfrag -srd -out installer\AppFiles.wxs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "$wixPath\candle.exe" installer\product.wxs installer\AppFiles.wxs -out installer\ -arch x64
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "$wixPath\light.exe" installer\product.wixobj installer\AppFiles.wixobj -out installer\installer_output\MyARAP.msi -ext WixUIExtension
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi -ext WixToolset.UI.wixext
 
       - name: Upload MSI installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: MyARAP_Setup_MSI
           path: installer/installer_output/MyARAP.msi
