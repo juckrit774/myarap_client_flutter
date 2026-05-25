@@ -46,14 +46,11 @@ jobs:
       - name: Install WiX v4
         run: dotnet tool install --global wix
 
-      - name: Add WiX UI extension
-        run: wix extension add WixToolset.UI.wixext --global
-
       - name: Build MSI
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
-          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi -ext WixToolset.UI.wixext
+          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi
 
       - name: Upload MSI installer
         uses: actions/upload-artifact@v4.6.2
