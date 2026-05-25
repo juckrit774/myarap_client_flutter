@@ -42,11 +42,20 @@ jobs:
           path: installer/installer_output/MyARAP_Setup.exe
           retention-days: 30
 
-      # ── MSI Installer (WiX v3 pre-installed on runner) ──────────────────
+      # ── MSI Installer (WiX v3) ───────────────────────────────────────────
+      - name: Install WiX v3
+        shell: powershell
+        run: |
+          choco install wixtoolset --version 3.11.2.4516 -y --force
+          echo "WiX installed"
+
       - name: Build MSI
         shell: powershell
         run: |
-          $wixPath = "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          $wixDir = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset*" -Directory | Select-Object -First 1
+          if (-not $wixDir) { Write-Error "WiX not found"; exit 1 }
+          $wixPath = Join-Path $wixDir.FullName "bin"
+          Write-Host "Using WiX at: $wixPath"
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
           & "$wixPath\heat.exe" dir build\windows\x64\runner\Release -cg AppFiles -dr INSTALLFOLDER -gg -scom -sreg -sfrag -srd -out installer\AppFiles.wxs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
