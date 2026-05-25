@@ -1,0 +1,302 @@
+import Cocoa
+import FlutterMacOS
+import IOKit
+import Metal
+
+@main
+class AppDelegate: FlutterAppDelegate {
+  // Static so it's retained at class level — NSStatusBar does NOT retain status items.
+  private static var statusItem: NSStatusItem!
+
+  override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+    return false  // Keep running in menu bar after window is hidden
+  }
+
+  override func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+    return true
+  }
+
+  @objc override func applicationWillFinishLaunching(_ notification: Notification) {
+    super.applicationWillFinishLaunching(notification)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+      self.setupStatusBar()
+    }
+  }
+
+  // Re-show window when user clicks the dock icon while window is hidden
+  override func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    if !flag { showMainWindow() }
+    return true
+  }
+
+  // MARK: - Status Bar
+
+  private func setupStatusBar() {
+    AppDelegate.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+
+    guard let button = AppDelegate.statusItem.button else { return }
+
+    if let url = Bundle.main.url(forResource: "logo-myarapp", withExtension: "png"),
+       let logo = NSImage(contentsOf: url) {
+      logo.isTemplate = true
+      logo.size = NSSize(width: 18, height: 18)
+      button.image = logo
+    } else if let logo = NSImage(named: NSImage.Name("logo-myarapp")) {
+      logo.isTemplate = true
+      logo.size = NSSize(width: 18, height: 18)
+      button.image = logo
+    } else if #available(macOS 11.0, *) {
+      button.image = NSImage(systemSymbolName: "laptopcomputer", accessibilityDescription: "MYARAP")
+    } else {
+      button.title = "M"
+    }
+    button.toolTip = "MYARAP"
+
+    let menu = NSMenu()
+
+    // Show — bring main window to front
+    let showItem = NSMenuItem(title: "Show MYARAP", action: #selector(showMainWindow), keyEquivalent: "")
+    if #available(macOS 11.0, *) {
+      showItem.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: "Show")
+    }
+    menu.addItem(showItem)
+
+    menu.addItem(.separator())
+
+    // Setting — navigate to Flutter SettingsScreen
+    let settingItem = NSMenuItem(title: "Setting", action: #selector(openSetting), keyEquivalent: ",")
+    settingItem.keyEquivalentModifierMask = .command
+    if #available(macOS 11.0, *) {
+      settingItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Setting")
+    }
+    menu.addItem(settingItem)
+
+    menu.addItem(.separator())
+
+    menu.addItem(NSMenuItem(title: "Quit MYARAP", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+    AppDelegate.statusItem.menu = menu
+  }
+
+  @objc private func showMainWindow() {
+    NSApp.setActivationPolicy(.regular)
+    NSApp.windows.first?.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  @objc private func openSetting() {
+    showMainWindow()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+      MainFlutterWindow.windowChannel?.invokeMethod("openSetting", arguments: nil)
+    }
+  }
+}
+
+// MARK: - Mac Device Info Channel
+
+class MacDeviceInfo {
+
+  private static func runShell(_ command: String) -> String {
+    let task = Process()
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = Pipe()
+    task.launchPath = "/bin/bash"
+    task.arguments = ["-c", command]
+    task.launch()
+    task.waitUntilExit()
+    return String(data: pipe.fileHandleForReading.availableData, encoding: .utf8)?
+      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  }
+
+  private static func sysctl(_ key: String) -> String {
+    return runShell("sysctl -n \(key)")
+  }
+
+  private static func systemProfilerAll(_ dataType: String) -> String {
+    return runShell("system_profiler \(dataType)")
+  }
+
+  private static func extractKey(_ output: String, key: String) -> String {
+    for line in output.components(separatedBy: "\n") {
+      guard line.contains(key) else { continue }
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      let parts = trimmed.split(separator: ":", maxSplits: 1)
+      guard parts.count >= 2 else { continue }
+      let value = "\(parts[1])".trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !value.isEmpty else { continue }
+      return value
+    }
+    return ""
+  }
+
+  private static func getSerialNumber() -> String {
+    let expert = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+    guard expert > 0 else { return "" }
+    defer { IOObjectRelease(expert) }
+    return (IORegistryEntryCreateCFProperty(expert, kIOPlatformSerialNumberKey as CFString, kCFAllocatorDefault, 0)
+      .takeUnretainedValue() as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  }
+
+  private static func getModelIdentifier() -> String {
+    let service = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+    defer { IOObjectRelease(service) }
+    guard let data = IORegistryEntryCreateCFProperty(service, "model" as CFString, kCFAllocatorDefault, 0)
+      .takeRetainedValue() as? Data else { return "" }
+    return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .controlCharacters) ?? ""
+  }
+
+  private static func getHardwareUUID() -> String {
+    let expert = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+    guard expert > 0 else { return "" }
+    defer { IOObjectRelease(expert) }
+    return (IORegistryEntryCreateCFProperty(expert, kIOPlatformUUIDKey as CFString, kCFAllocatorDefault, 0)
+      .takeUnretainedValue() as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  }
+
+  private static func getGPU() -> String {
+    return MTLCreateSystemDefaultDevice()?.name ?? ""
+  }
+
+  private static func getCPUArchitecture() -> String {
+    var info = utsname()
+    uname(&info)
+    return withUnsafeBytes(of: &info.machine) { buf -> String in
+      let data = Data(buf)
+      guard let last = data.lastIndex(where: { $0 != 0 }) else { return "" }
+      return String(data: data[0...last], encoding: .isoLatin1) ?? ""
+    }
+  }
+
+  private static func getIPAddress() -> String {
+    var result: String?
+    var ifaddr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddr) == 0 else { return "" }
+    defer { freeifaddrs(ifaddr) }
+    var ptr = ifaddr
+    while let cur = ptr {
+      defer { ptr = cur.pointee.ifa_next }
+      let iface = cur.pointee
+      let family = iface.ifa_addr.pointee.sa_family
+      guard family == UInt8(AF_INET) || family == UInt8(AF_INET6) else { continue }
+      let name = String(cString: iface.ifa_name)
+      guard ["en0", "en2", "en3", "en4"].contains(name) else { continue }
+      var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+      getnameinfo(iface.ifa_addr, socklen_t(iface.ifa_addr.pointee.sa_len),
+                  &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+      result = String(cString: host)
+    }
+    return result ?? ""
+  }
+
+  private static func getStorageCapacity() -> Int {
+    let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeTotalCapacityKey]) ?? []
+    for url in urls {
+      if let total = try? url.resourceValues(forKeys: [.volumeTotalCapacityKey]).volumeTotalCapacity {
+        return total
+      }
+    }
+    return 0
+  }
+
+  private static func getStorageAvailable() -> Int {
+    let urls = FileManager.default.mountedVolumeURLs(
+      includingResourceValuesForKeys: [.volumeAvailableCapacityForImportantUsageKey]) ?? []
+    for url in urls {
+      if let avail = try? url.resourceValues(
+        forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage {
+        return Int(avail)
+      }
+    }
+    return 0
+  }
+
+  private static func getDisplays() -> [[String: Any]] {
+    return NSScreen.screens.map { screen in
+      let scale = screen.backingScaleFactor
+      let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+      let isBuiltin = CGDisplayIsBuiltin(displayID) != 0
+      return [
+        "name": screen.localizedName,
+        "resolutionX": Int(screen.frame.size.width * scale),
+        "resolutionY": Int(screen.frame.size.height * scale),
+        "builtin": isBuiltin,
+      ]
+    }
+  }
+
+  private static func getAllApplications() -> [[String: Any]] {
+    let fm = FileManager.default
+    guard let appsUrl = try? fm.url(for: .applicationDirectory, in: .localDomainMask,
+                                     appropriateFor: nil, create: false) else { return [] }
+    let urls = (try? fm.contentsOfDirectory(at: appsUrl, includingPropertiesForKeys: [],
+                                             options: [.skipsPackageDescendants, .skipsSubdirectoryDescendants])) ?? []
+    return urls.compactMap { url -> [String: Any]? in
+      guard fm.isExecutableFile(atPath: url.path), let mdi = NSMetadataItem(url: url) else { return nil }
+      return [
+        "name": mdi.value(forAttribute: kMDItemDisplayName as String) as? String ?? "",
+        "version": mdi.value(forAttribute: kMDItemVersion as String) as? String ?? "",
+        "size": mdi.value(forAttribute: kMDItemFSSize as String) as? Int ?? 0
+      ]
+    }
+  }
+
+  static func collect(result: @escaping FlutterResult) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      let osVer = ProcessInfo.processInfo.operatingSystemVersion
+
+      let hw   = systemProfilerAll("SPHardwareDataType")
+      let sw   = systemProfilerAll("SPSoftwareDataType")
+      let mem  = systemProfilerAll("SPMemoryDataType")
+      let stor = systemProfilerAll("SPStorageDataType")
+
+      let info: [String: Any] = [
+        "processor":       sysctl("machdep.cpu.brand_string"),
+        "vendor":          sysctl("machdep.cpu.vendor"),
+        "cpuFrequency":    sysctl("hw.cpufrequency"),
+        "cpuFrequencyMax": sysctl("hw.cpufrequency_max"),
+        "cpuFrequencyMin": sysctl("hw.cpufrequency_min"),
+        "cpuArchitecture": getCPUArchitecture(),
+
+        "modelName":       extractKey(hw, key: "Model Name"),
+        "chip":            extractKey(hw, key: "Chip"),
+        "totalCores":      extractKey(hw, key: "Total Number of Cores"),
+        "memory":          extractKey(hw, key: "Memory"),
+        "firmwareVersion": extractKey(hw, key: "System Firmware Version"),
+
+        "modelIdentifier": getModelIdentifier(),
+        "serialNumber":    getSerialNumber(),
+        "hardwareUUID":    getHardwareUUID(),
+
+        "systemVersion":   extractKey(sw, key: "System Version"),
+        "kernelVersion":   extractKey(sw, key: "Kernel Version"),
+        "bootVolume":      extractKey(sw, key: "Boot Volume"),
+        "bootMode":        extractKey(sw, key: "Boot Mode"),
+        "computerName":    extractKey(sw, key: "Computer Name"),
+        "spUserName":      extractKey(sw, key: "User Name"),
+        "timeSinceBoot":   extractKey(sw, key: "Time since boot"),
+        "fullUserName":    NSFullUserName(),
+        "hostName":        Host.current().name ?? "",
+        "localizedName":   Host.current().localizedName ?? "",
+        "osVersionMajor":  osVer.majorVersion,
+        "osVersionMinor":  osVer.minorVersion,
+        "osVersionPatch":  osVer.patchVersion,
+
+        "memoryType":         extractKey(mem, key: "Type"),
+        "memoryManufacturer": extractKey(mem, key: "Manufacturer"),
+
+        "storageName":      extractKey(stor, key: "Device Name"),
+        "storageType":      extractKey(stor, key: "Medium"),
+        "storageCapacity":  getStorageCapacity(),
+        "storageAvailable": getStorageAvailable(),
+
+        "displays": getDisplays(),
+        "gpu":      getGPU(),
+        "ipAddress": getIPAddress(),
+        "applications": getAllApplications()
+      ]
+
+      DispatchQueue.main.async { result(info) }
+    }
+  }
+}
