@@ -28,15 +28,35 @@ jobs:
       - name: Build Windows
         run: flutter build windows --release
 
+      # ── EXE Installer (Inno Setup) ──────────────────────────────────────
       - name: Install Inno Setup
         run: choco install innosetup -y
 
-      - name: Create installer
+      - name: Create EXE installer
         run: iscc installer\setup.iss
 
-      - name: Upload installer
+      - name: Upload EXE installer
         uses: actions/upload-artifact@v4
         with:
-          name: MyARAP_Setup
+          name: MyARAP_Setup_EXE
           path: installer/installer_output/MyARAP_Setup.exe
+          retention-days: 30
+
+      # ── MSI Installer (WiX Toolset) ─────────────────────────────────────
+      - name: Install WiX Toolset
+        run: choco install wixtoolset -y
+
+      - name: Build MSI
+        run: |
+          $wixPath = (Get-ChildItem "C:\Program Files (x86)\WiX Toolset*" | Select-Object -First 1).FullName + "\bin"
+          New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
+          & "$wixPath\heat.exe" dir build\windows\x64\runner\Release -cg AppFiles -dr INSTALLFOLDER -gg -scom -sreg -sfrag -srd -out installer\AppFiles.wxs
+          & "$wixPath\candle.exe" installer\product.wxs installer\AppFiles.wxs -out installer\ -arch x64
+          & "$wixPath\light.exe" installer\product.wixobj installer\AppFiles.wixobj -out installer\installer_output\MyARAP.msi -ext WixUIExtension
+
+      - name: Upload MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyARAP_Setup_MSI
+          path: installer/installer_output/MyARAP.msi
           retention-days: 30
