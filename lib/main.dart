@@ -3,12 +3,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'core/config/app_colors.dart';
 import 'core/config/app_config.dart';
+import 'core/services/network_manager.dart';
 import 'features/home/presentation/screens/home_screen.dart';
 import 'features/settings/presentation/screens/settings_screen.dart';
 
 final _navigatorKey = GlobalKey<NavigatorState>();
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await NetworkManager.instance.updateBaseUrl();
   runApp(const MyarapApp());
 }
 

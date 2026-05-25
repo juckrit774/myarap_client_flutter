@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/config/app_colors.dart';
 import '../../../../core/config/app_config.dart';
+import '../../../../core/services/network_manager.dart';
 import '../../../../core/storage/cache_manager.dart';
 import '../../../../shared/widgets/app_header.dart';
 
@@ -31,6 +32,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _isSaving = true);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('server_url', _urlController.text.trim());
+    await NetworkManager.instance.updateBaseUrl();
     setState(() => _isSaving = false);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(

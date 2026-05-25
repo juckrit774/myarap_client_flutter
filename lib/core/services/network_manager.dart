@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
 import '../models/base_request_model.dart';
 import '../models/base_response_model.dart';
@@ -12,8 +13,7 @@ class NetworkManager {
   NetworkManager._() {
     (_dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
       final client = HttpClient();
-      // Allow self-signed cert for localhost testing only
-      client.badCertificateCallback = (cert, host, port) => host == 'localhost';
+      client.badCertificateCallback = (cert, host, port) => true;
       return client;
     };
   }
@@ -24,6 +24,12 @@ class NetworkManager {
     receiveTimeout: const Duration(seconds: 15),
     headers: {'Content-Type': 'application/json'},
   ));
+
+  Future<void> updateBaseUrl() async {
+    final prefs = await SharedPreferences.getInstance();
+    final url = prefs.getString('server_url') ?? AppConfig.baseUrl;
+    _dio.options.baseUrl = url;
+  }
 
   Future<BaseResponseModel<T>> request<T>({
     required BaseRequestModel request,
