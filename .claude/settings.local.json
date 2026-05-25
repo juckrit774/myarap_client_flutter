@@ -39,7 +39,14 @@
       "Bash(tee /tmp/myarap_out.txt)",
       "Bash(nm /Users/juckrit-ar-mobile/Documents/Project/Project-Flutter/myarap_flutter_full/build/macos/Build/Products/Debug/FlutterMacOS.framework/Versions/A/FlutterMacOS)",
       "Bash(jobs)",
-      "Bash(flutter doctor *)"
+      "Bash(flutter doctor *)",
+      "Bash(git ls-remote *)",
+      "Bash(git config *)",
+      "Bash(git remote *)",
+      "Bash(ssh *)",
+      "Bash(git -C ~/Documents/Project/Project-Flutter/myarap_flutter remote -v)",
+      "Bash(git -C ~/Documents/Project/Project-Flutter/swuflutter remote -v)",
+      "Bash(git *)"
     ]
   }
 }
