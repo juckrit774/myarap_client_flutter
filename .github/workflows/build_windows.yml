@@ -48,12 +48,10 @@ jobs:
 
       - name: Build MSI
         shell: powershell
-        continue-on-error: true
         run: |
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
           wix --version
-          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi 2>&1 | Tee-Object wix_build.log
-          exit $LASTEXITCODE
+          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi
 
       - name: Upload WiX build log
         if: always()

@@ -40,7 +40,7 @@
     </StandardDirectory>
 
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
-      <Files Include="..\build\windows\x64\runner\Release\**" />
+      <Files Include="build\windows\x64\runner\Release\**" />
     </ComponentGroup>
   </Fragment>
 
