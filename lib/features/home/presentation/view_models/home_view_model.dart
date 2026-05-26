@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../../data/models/device_model.dart';
 import '../../../auth/models/login_response_model.dart';
@@ -240,9 +241,15 @@ class HomeViewModel extends ChangeNotifier {
 
   Map<String, dynamic> _deviceInfoPayload(
       DeviceDetail d, String osVer, int cores, int memGB) {
+    final isWindows = Platform.isWindows;
+    final manufacturer = isWindows
+        ? (d.vendor.isNotEmpty ? d.vendor : 'Microsoft')
+        : 'APPLE';
+    final osPlatform = isWindows ? 'Windows' : 'macOS';
+    final osName = isWindows ? 'Windows' : 'macOS';
     return {
       'model': d.modelIdentifier,
-      'manufacturer': 'APPLE',
+      'manufacturer': manufacturer,
       'serialNumber': d.serialNumber,
       'uuid': d.hardwareUUID,
       'sku': '',
@@ -256,8 +263,8 @@ class HomeViewModel extends ChangeNotifier {
       },
       'os': {
         'manufacturer': '',
-        'platform': 'macOS',
-        'name': 'macOS',
+        'platform': osPlatform,
+        'name': osName,
         'version': osVer,
         'arch': d.cpuArchitecture,
         'serial': '',

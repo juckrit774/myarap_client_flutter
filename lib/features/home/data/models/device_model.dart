@@ -329,6 +329,8 @@ class DeviceDetail {
 
   static Future<Map<String, dynamic>> _windowsInfo() async {
     const script = r'''
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "SilentlyContinue"
 $bios     = Get-CimInstance Win32_BIOS
 $cs       = Get-CimInstance Win32_ComputerSystem
@@ -425,10 +427,13 @@ $apps = @(foreach ($path in $regPaths) {
         'powershell',
         ['-NoProfile', '-NonInteractive', '-Command', script],
         runInShell: false,
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
       );
       final output = proc.stdout.toString().trim();
       if (output.isEmpty) return {};
-      return jsonDecode(output) as Map<String, dynamic>;
+      final clean = output.startsWith('﻿') ? output.substring(1) : output;
+      return jsonDecode(clean) as Map<String, dynamic>;
     } catch (_) {}
     return {};
   }
