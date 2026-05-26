@@ -50,7 +50,11 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
+          Write-Host "=== WiX version ==="
+          wix --version
+          Write-Host "=== Building MSI ==="
           wix build installer\product.wxs -o installer\installer_output\MyARAP.msi
+          Write-Host "Exit: $LASTEXITCODE"
 
       - name: Upload MSI installer
         uses: actions/upload-artifact@v4.6.2
