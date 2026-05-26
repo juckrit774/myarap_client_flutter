@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
 
@@ -246,61 +247,112 @@ class DeviceDetail {
 
   static Future<DeviceDetail> _collectWindows() async {
     final info = await _windowsInfo();
-    final memGB = int.tryParse(info['memoryGB'] ?? '0') ?? 0;
+    final memGB = int.tryParse(info['memoryGB'] as String? ?? '0') ?? 0;
+    final cpuMHz = int.tryParse(info['cpuMaxSpeedMHz'] as String? ?? '0') ?? 0;
+
+    // Parse displays
+    final rawDisplays = info['displays'];
+    final displays = <DisplayInfo>[];
+    if (rawDisplays is List) {
+      for (final item in rawDisplays) {
+        if (item is Map) {
+          displays.add(DisplayInfo(
+            name: item['name'] as String? ?? 'Display',
+            resolutionX: (item['resolutionX'] as num?)?.toInt() ?? 0,
+            resolutionY: (item['resolutionY'] as num?)?.toInt() ?? 0,
+            builtin: item['builtin'] as bool? ?? false,
+          ));
+        }
+      }
+    }
+    if (displays.isEmpty) {
+      displays.add(const DisplayInfo(name: 'Primary Display', resolutionX: 0, resolutionY: 0, builtin: false));
+    }
+
+    String s(String key) => info[key] as String? ?? '';
+
     return DeviceDetail(
-      computerName: info['computerName'] ?? '',
-      localizedName: info['computerName'] ?? '',
-      hostName: info['computerName'] ?? '',
-      fullUserName: info['userName'] ?? '',
-      serialNumber: info['serialNumber'] ?? '',
-      hardwareUUID: info['uuid'] ?? '',
-      modelName: info['model'] ?? '',
-      modelIdentifier: info['model'] ?? '',
+      computerName: s('computerName'),
+      localizedName: s('computerName'),
+      hostName: s('computerName'),
+      fullUserName: s('userName'),
+      serialNumber: s('serialNumber'),
+      hardwareUUID: s('uuid'),
+      modelName: s('model'),
+      modelIdentifier: s('model'),
       chip: '',
-      processor: info['processor'] ?? '',
-      vendor: info['manufacturer'] ?? '',
-      totalCores: info['cores'] ?? '',
-      cpuFrequency: '',
+      processor: s('processor'),
+      vendor: s('manufacturer'),
+      totalCores: s('cores'),
+      cpuFrequency: cpuMHz > 0 ? '${cpuMHz * 1000000}' : '',
       cpuFrequencyMin: '',
-      cpuFrequencyMax: '',
-      cpuArchitecture: info['arch'] ?? '',
-      memory: memGB > 0 ? '$memGB GB' : (info['memory'] ?? ''),
+      cpuFrequencyMax: cpuMHz > 0 ? '${cpuMHz * 1000000}' : '',
+      cpuArchitecture: s('arch'),
+      memory: memGB > 0 ? '$memGB GB' : '',
       memoryType: '',
       memoryManufacturer: '',
-      storageName: info['storageName'] ?? '',
-      storageType: 'HDD',
-      storageCapacityBytes: int.tryParse(info['storageBytes'] ?? '0') ?? 0,
-      storageAvailableBytes: int.tryParse(info['storageFreeBytes'] ?? '0') ?? 0,
-      gpu: info['gpu'] ?? '',
-      osVersion: info['osVersion'] ?? '',
-      systemVersion: info['osVersion'] ?? '',
-      kernelVersion: '',
-      bootVolume: '',
+      storageName: s('storageName'),
+      storageType: s('storageType').isNotEmpty ? s('storageType') : 'Unknown',
+      storageCapacityBytes: int.tryParse(s('storageBytes')) ?? 0,
+      storageAvailableBytes: int.tryParse(s('storageFreeBytes')) ?? 0,
+      gpu: s('gpu'),
+      osVersion: s('osVersion'),
+      systemVersion: s('osVersion'),
+      kernelVersion: s('kernelVersion'),
+      bootVolume: 'C:',
       bootMode: '',
-      timeSinceBoot: '',
-      firmwareVersion: '',
-      ipAddress: info['ipAddress'] ?? '',
-      displaysDetail: const [DisplayInfo(name: 'Primary Display', resolutionX: 0, resolutionY: 0, builtin: false)],
+      timeSinceBoot: s('timeSinceBoot'),
+      firmwareVersion: s('firmwareVersion'),
+      ipAddress: s('ipAddress'),
+      displaysDetail: displays,
       applications: const [],
     );
   }
 
-  static Future<Map<String, String>> _windowsInfo() async {
+  static Future<Map<String, dynamic>> _windowsInfo() async {
     const script = r'''
 $ErrorActionPreference = "SilentlyContinue"
-$bios   = Get-CimInstance Win32_BIOS
-$cs     = Get-CimInstance Win32_ComputerSystem
-$cpu    = Get-CimInstance Win32_Processor | Select-Object -First 1
-$os     = Get-CimInstance Win32_OperatingSystem
-$prod   = Get-CimInstance Win32_ComputerSystemProduct
-$gpu    = Get-CimInstance Win32_VideoController | Select-Object -First 1
-$disk   = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-$ip     = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
-            $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.*'
-          } | Select-Object -First 1).IPAddress
-$arch   = if ($cpu.Architecture -eq 9) { 'x64' } elseif ($cpu.Architecture -eq 0) { 'x86' } else { $cpu.Architecture.ToString() }
-$memGB  = [math]::Floor($cs.TotalPhysicalMemory / 1GB)
-$user   = $cs.UserName; if ($user -like '*\*') { $user = $user.Split('\')[-1] }
+$bios     = Get-CimInstance Win32_BIOS
+$cs       = Get-CimInstance Win32_ComputerSystem
+$cpu      = Get-CimInstance Win32_Processor | Select-Object -First 1
+$os       = Get-CimInstance Win32_OperatingSystem
+$prod     = Get-CimInstance Win32_ComputerSystemProduct
+$disk     = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+$physDisk = Get-PhysicalDisk | Sort-Object Size -Descending | Select-Object -First 1
+$ip       = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+              $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.*'
+            } | Select-Object -First 1).IPAddress
+
+$arch = if ($cpu.Architecture -eq 9) { 'x64' } elseif ($cpu.Architecture -eq 0) { 'x86' } else { $cpu.Architecture.ToString() }
+$memGB = [math]::Floor($cs.TotalPhysicalMemory / 1GB)
+$user = $cs.UserName; if ($user -like '*\*') { $user = $user.Split('\')[-1] }
+
+$storageType = switch ($physDisk.MediaType) {
+  'SSD'         { 'SSD' }
+  'HDD'         { 'HDD' }
+  default       { 'Unknown' }
+}
+
+$bootTime = $os.LastBootUpTime
+$uptime = (Get-Date) - $bootTime
+$uptimeStr = "$([math]::Floor($uptime.TotalDays))d $($uptime.Hours)h $($uptime.Minutes)m"
+
+$displays = @(Get-CimInstance Win32_VideoController |
+  Where-Object { $_.CurrentHorizontalResolution -gt 0 } |
+  ForEach-Object {
+    @{
+      name        = $_.Name
+      resolutionX = [int]$_.CurrentHorizontalResolution
+      resolutionY = [int]$_.CurrentVerticalResolution
+      builtin     = $false
+    }
+  })
+if ($displays.Count -eq 0) {
+  $displays = @(@{ name = 'Primary Display'; resolutionX = 0; resolutionY = 0; builtin = $false })
+}
+
+$gpu = (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name
+
 @{
   serialNumber    = $bios.SerialNumber
   computerName    = $cs.Name
@@ -311,33 +363,33 @@ $user   = $cs.UserName; if ($user -like '*\*') { $user = $user.Split('\')[-1] }
   memoryGB        = $memGB.ToString()
   processor       = $cpu.Name
   arch            = $arch
+  cpuMaxSpeedMHz  = $cpu.MaxClockSpeed.ToString()
   osVersion       = "$($os.Caption) $($os.Version)".Trim()
+  kernelVersion   = $os.Version
   uuid            = $prod.UUID
-  gpu             = $gpu.Name
+  gpu             = $gpu
   storageBytes    = $disk.Size.ToString()
   storageFreeBytes= $disk.FreeSpace.ToString()
   storageName     = $disk.VolumeName
+  storageType     = $storageType
+  firmwareVersion = $bios.SMBIOSBIOSVersion
+  timeSinceBoot   = $uptimeStr
   ipAddress       = $ip
-} | ConvertTo-Json
+  displays        = $displays
+} | ConvertTo-Json -Depth 3
 ''';
 
-    final result = <String, String>{};
     try {
       final proc = await Process.run(
         'powershell',
         ['-NoProfile', '-NonInteractive', '-Command', script],
         runInShell: false,
       );
-      final json = proc.stdout.toString().trim();
-      if (json.isEmpty) return result;
-
-      // Simple JSON key-value parse (avoids dart:convert import)
-      final re = RegExp(r'"(\w+)"\s*:\s*"([^"]*)"');
-      for (final m in re.allMatches(json)) {
-        result[m.group(1)!] = m.group(2)!;
-      }
+      final output = proc.stdout.toString().trim();
+      if (output.isEmpty) return {};
+      return jsonDecode(output) as Map<String, dynamic>;
     } catch (_) {}
-    return result;
+    return {};
   }
 
   static DeviceDetail _fallback() => const DeviceDetail(
