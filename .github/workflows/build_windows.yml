@@ -48,15 +48,23 @@ jobs:
 
       - name: Build MSI
         shell: powershell
+        continue-on-error: true
         run: |
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
-          Write-Host "=== WiX version ==="
           wix --version
-          Write-Host "=== Building MSI ==="
-          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi
-          Write-Host "Exit: $LASTEXITCODE"
+          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi 2>&1 | Tee-Object wix_build.log
+          exit $LASTEXITCODE
+
+      - name: Upload WiX build log
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: wix_build_log
+          path: wix_build.log
+          retention-days: 7
 
       - name: Upload MSI installer
+        if: hashFiles('installer/installer_output/MyARAP.msi') != ''
         uses: actions/upload-artifact@v4.6.2
         with:
           name: MyARAP_Setup_MSI
