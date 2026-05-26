@@ -64,7 +64,6 @@ jobs:
           retention-days: 7
 
       - name: Upload MSI installer
-        if: hashFiles('installer/installer_output/MyARAP.msi') != ''
         uses: actions/upload-artifact@v4.6.2
         with:
           name: MyARAP_Setup_MSI
