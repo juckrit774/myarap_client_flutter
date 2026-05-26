@@ -246,31 +246,32 @@ class DeviceDetail {
 
   static Future<DeviceDetail> _collectWindows() async {
     final info = await _windowsInfo();
+    final memGB = int.tryParse(info['memoryGB'] ?? '0') ?? 0;
     return DeviceDetail(
       computerName: info['computerName'] ?? '',
       localizedName: info['computerName'] ?? '',
       hostName: info['computerName'] ?? '',
-      fullUserName: '',
-      serialNumber: '',
-      hardwareUUID: '',
-      modelName: info['productName'] ?? '',
-      modelIdentifier: info['productName'] ?? '',
+      fullUserName: info['userName'] ?? '',
+      serialNumber: info['serialNumber'] ?? '',
+      hardwareUUID: info['uuid'] ?? '',
+      modelName: info['model'] ?? '',
+      modelIdentifier: info['model'] ?? '',
       chip: '',
-      processor: '${info['cores'] ?? ''} cores',
-      vendor: '',
+      processor: info['processor'] ?? '',
+      vendor: info['manufacturer'] ?? '',
       totalCores: info['cores'] ?? '',
       cpuFrequency: '',
       cpuFrequencyMin: '',
       cpuFrequencyMax: '',
-      cpuArchitecture: '',
-      memory: info['memory'] ?? '',
+      cpuArchitecture: info['arch'] ?? '',
+      memory: memGB > 0 ? '$memGB GB' : (info['memory'] ?? ''),
       memoryType: '',
       memoryManufacturer: '',
-      storageName: '',
-      storageType: '',
-      storageCapacityBytes: 0,
-      storageAvailableBytes: 0,
-      gpu: '',
+      storageName: info['storageName'] ?? '',
+      storageType: 'HDD',
+      storageCapacityBytes: int.tryParse(info['storageBytes'] ?? '0') ?? 0,
+      storageAvailableBytes: int.tryParse(info['storageFreeBytes'] ?? '0') ?? 0,
+      gpu: info['gpu'] ?? '',
       osVersion: info['osVersion'] ?? '',
       systemVersion: info['osVersion'] ?? '',
       kernelVersion: '',
@@ -278,28 +279,65 @@ class DeviceDetail {
       bootMode: '',
       timeSinceBoot: '',
       firmwareVersion: '',
-      ipAddress: '',
+      ipAddress: info['ipAddress'] ?? '',
       displaysDetail: const [DisplayInfo(name: 'Primary Display', resolutionX: 0, resolutionY: 0, builtin: false)],
       applications: const [],
     );
   }
 
   static Future<Map<String, String>> _windowsInfo() async {
+    const script = r'''
+$ErrorActionPreference = "SilentlyContinue"
+$bios   = Get-CimInstance Win32_BIOS
+$cs     = Get-CimInstance Win32_ComputerSystem
+$cpu    = Get-CimInstance Win32_Processor | Select-Object -First 1
+$os     = Get-CimInstance Win32_OperatingSystem
+$prod   = Get-CimInstance Win32_ComputerSystemProduct
+$gpu    = Get-CimInstance Win32_VideoController | Select-Object -First 1
+$disk   = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+$ip     = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+            $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.*'
+          } | Select-Object -First 1).IPAddress
+$arch   = if ($cpu.Architecture -eq 9) { 'x64' } elseif ($cpu.Architecture -eq 0) { 'x86' } else { $cpu.Architecture.ToString() }
+$memGB  = [math]::Floor($cs.TotalPhysicalMemory / 1GB)
+$user   = $cs.UserName; if ($user -like '*\*') { $user = $user.Split('\')[-1] }
+@{
+  serialNumber    = $bios.SerialNumber
+  computerName    = $cs.Name
+  manufacturer    = $cs.Manufacturer
+  model           = $cs.Model
+  cores           = $cs.NumberOfLogicalProcessors.ToString()
+  userName        = $user
+  memoryGB        = $memGB.ToString()
+  processor       = $cpu.Name
+  arch            = $arch
+  osVersion       = "$($os.Caption) $($os.Version)".Trim()
+  uuid            = $prod.UUID
+  gpu             = $gpu.Name
+  storageBytes    = $disk.Size.ToString()
+  storageFreeBytes= $disk.FreeSpace.ToString()
+  storageName     = $disk.VolumeName
+  ipAddress       = $ip
+} | ConvertTo-Json
+''';
+
+    final result = <String, String>{};
     try {
-      final r = await Process.run('wmic', ['computersystem', 'get', 'Name,TotalPhysicalMemory'], runInShell: true);
-      final lines = r.stdout.toString().split('\n');
-      if (lines.length > 1) {
-        final parts = lines[1].trim().split(RegExp(r'\s+'));
-        if (parts.length >= 2) {
-          final memMB = int.tryParse(parts[1]) ?? 0;
-          return {
-            'computerName': parts[0],
-            'memory': '${memMB ~/ (1024 * 1024 * 1024)} GB',
-          };
-        }
+      final proc = await Process.run(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', script],
+        runInShell: false,
+      );
+      final json = proc.stdout.toString().trim();
+      if (json.isEmpty) return result;
+
+      // Simple JSON key-value parse (avoids dart:convert import)
+      final re = RegExp(r'"(\w+)"\s*:\s*"([^"]*)"');
+      for (final m in re.allMatches(json)) {
+        result[m.group(1)!] = m.group(2)!;
       }
     } catch (_) {}
-    return {};
+    return result;
   }
 
   static DeviceDetail _fallback() => const DeviceDetail(
