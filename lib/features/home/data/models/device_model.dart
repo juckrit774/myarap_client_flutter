@@ -269,6 +269,24 @@ class DeviceDetail {
       displays.add(const DisplayInfo(name: 'Primary Display', resolutionX: 0, resolutionY: 0, builtin: false));
     }
 
+    // Parse applications
+    final rawApps = info['applications'];
+    final applications = <ApplicationInfo>[];
+    if (rawApps is List) {
+      for (final item in rawApps) {
+        if (item is Map) {
+          final name = item['name'] as String? ?? '';
+          if (name.isNotEmpty) {
+            applications.add(ApplicationInfo(
+              name: name,
+              version: item['version'] as String? ?? '',
+              size: (item['size'] as num?)?.toInt() ?? 0,
+            ));
+          }
+        }
+      }
+    }
+
     String s(String key) => info[key] as String? ?? '';
 
     return DeviceDetail(
@@ -305,7 +323,7 @@ class DeviceDetail {
       firmwareVersion: s('firmwareVersion'),
       ipAddress: s('ipAddress'),
       displaysDetail: displays,
-      applications: const [],
+      applications: applications,
     );
   }
 
@@ -353,6 +371,28 @@ if ($displays.Count -eq 0) {
 
 $gpu = (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name
 
+$regPaths = @(
+  'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$seen = @{}
+$apps = @(foreach ($path in $regPaths) {
+  Get-ItemProperty $path -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName -and $_.DisplayName.Trim() -ne '' } |
+    ForEach-Object {
+      $name = $_.DisplayName.Trim()
+      if (-not $seen[$name]) {
+        $seen[$name] = $true
+        @{
+          name    = $name
+          version = if ($_.DisplayVersion) { $_.DisplayVersion } else { '' }
+          size    = [long]($_.EstimatedSize) * 1024
+        }
+      }
+    }
+})
+
 @{
   serialNumber    = $bios.SerialNumber
   computerName    = $cs.Name
@@ -376,7 +416,8 @@ $gpu = (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name
   timeSinceBoot   = $uptimeStr
   ipAddress       = $ip
   displays        = $displays
-} | ConvertTo-Json -Depth 3
+  applications    = $apps
+} | ConvertTo-Json -Depth 4
 ''';
 
     try {
