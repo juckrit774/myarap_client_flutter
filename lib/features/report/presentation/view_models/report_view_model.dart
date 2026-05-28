@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../models/image_model.dart';
 import '../../../problem/models/m_problem_model.dart';
+import '../../../../core/services/network_manager.dart';
+import '../../../../core/models/base_request_model.dart';
 
 class ReportViewModel extends ChangeNotifier {
   bool isLoading = false;
@@ -21,8 +23,26 @@ class ReportViewModel extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await Future.delayed(const Duration(milliseconds: 300));
-      problemTypes = MProblemModel.mockList();
+      final response = await NetworkManager.instance.request<List<MProblemModel>>(
+        request: BaseRequestModel(
+          module: 'ProblemTracking',
+          target: 'MProblem',
+          token: token,
+          data: {},
+        ),
+        parseEntries: (json) {
+          if (json is List) {
+            return json.map((e) => MProblemModel.fromJson(e as Map<String, dynamic>)).toList();
+          }
+          return [];
+        },
+        url: '/v2/api/Select',
+      );
+      if (response.isSuccess && response.entries != null) {
+        problemTypes = response.entries!;
+      } else {
+        problemTypes = MProblemModel.mockList();
+      }
     } catch (_) {
       problemTypes = MProblemModel.mockList();
     }
@@ -92,12 +112,35 @@ class ReportViewModel extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // API multipart upload would go here
-      for (var i = 0; i <= 100; i += 20) {
-        await Future.delayed(const Duration(milliseconds: 150));
-        sendProgress = i / 100;
+      final response = await NetworkManager.instance.request<dynamic>(
+        request: BaseRequestModel(
+          module: 'ProblemTracking',
+          target: 'CreateProblem',
+          token: token,
+          data: {
+            'assetNo': assetNo,
+            'problems': selectedProblems.map((p) => p.id).toList(),
+            'remark': remark,
+          },
+        ),
+        parseEntries: (json) => json,
+        url: '/v2/api/Insert',
+      );
+
+      if (response.status == 401) {
+        isSending = false;
         notifyListeners();
+        NetworkManager.onUnauthorized?.call();
+        return false;
       }
+
+      if (!response.isSuccess) {
+        onError?.call(response.message.isNotEmpty ? response.message : 'ส่งรายงานไม่สำเร็จ');
+        isSending = false;
+        notifyListeners();
+        return false;
+      }
+
       _reset();
       isSending = false;
       notifyListeners();

@@ -79,9 +79,9 @@ class _ProblemCard extends StatelessWidget {
   final VoidCallback onTap;
 
   Color _statusColor(String status) => switch (status) {
-        'Open' => Colors.red,
-        'In Progress' => AppColors.orange,
-        'Resolved' => Colors.green,
+        'Open' || 'Opened' => Colors.red,
+        'In Progress' || 'Processing' => AppColors.orange,
+        'Resolved' || 'Closed' => Colors.green,
         _ => Colors.grey,
       };
 

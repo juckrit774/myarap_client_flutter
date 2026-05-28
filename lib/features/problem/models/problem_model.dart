@@ -29,7 +29,7 @@ class ProblemModel {
 
   factory ProblemModel.fromJson(Map<String, dynamic> json) {
     return ProblemModel(
-      id: json['uniqueId'] as String? ?? '',
+      id: json['uniqueId']?.toString() ?? '',
       problemNo: json['problemNo'] as String? ?? '',
       assetNo: json['assetNo'] as String? ?? '',
       problemList: (json['problemList'] as List<dynamic>?)

@@ -11,9 +11,9 @@ class ProblemDetailScreen extends StatelessWidget {
   const ProblemDetailScreen({super.key, required this.problem});
 
   Color _statusColor(String s) => switch (s) {
-        'Open' => Colors.red,
-        'In Progress' => AppColors.orange,
-        'Resolved' => Colors.green,
+        'Open' || 'Opened' => Colors.red,
+        'In Progress' || 'Processing' => AppColors.orange,
+        'Resolved' || 'Closed' => Colors.green,
         _ => Colors.grey,
       };
 

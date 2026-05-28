@@ -46,7 +46,25 @@
       "Bash(ssh *)",
       "Bash(git -C ~/Documents/Project/Project-Flutter/myarap_flutter remote -v)",
       "Bash(git -C ~/Documents/Project/Project-Flutter/swuflutter remote -v)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs?per_page=3\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26392788824/jobs\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26392788824/logs\" -L -o /tmp/logs.zip)",
+      "Bash(unzip -p /tmp/logs.zip \"*.txt\")",
+      "Bash(unzip -l /tmp/logs.zip)",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs?per_page=1\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26394982499/jobs\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26395533777/jobs\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26395765780/jobs\")",
+      "Bash(flutter analyze *)",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26427878213/jobs\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26428754027/jobs\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26429447655/jobs\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26429447655/artifacts\")",
+      "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26430214253/jobs\")",
+      "Bash(gh run *)",
+      "Bash(pandoc --version)",
+      "Bash(pip3 install *)"
     ]
   }
 }

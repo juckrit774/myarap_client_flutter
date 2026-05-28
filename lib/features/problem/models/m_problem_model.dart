@@ -13,9 +13,12 @@ class MProblemModel {
 
   factory MProblemModel.fromJson(Map<String, dynamic> json) {
     return MProblemModel(
-      id: json['uniqueId'] as String? ?? '',
+      id: (json['uniqueID'] ?? json['uniqueId'] ?? '').toString(),
       name: json['name'] as String? ?? '',
-      requireRemark: json['requireRemark'] as bool? ?? false,
+      requireRemark: json['requireRemark'] is bool
+          ? json['requireRemark'] as bool
+          : (json['requireRemark'] != null &&
+              json['requireRemark'].toString().isNotEmpty),
     );
   }
 

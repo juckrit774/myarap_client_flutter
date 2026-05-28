@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'core/config/app_colors.dart';
 import 'core/config/app_config.dart';
 import 'core/services/network_manager.dart';
+import 'core/storage/cache_manager.dart';
 import 'features/home/presentation/screens/home_screen.dart';
 import 'features/settings/presentation/screens/settings_screen.dart';
 
@@ -12,6 +13,16 @@ final _navigatorKey = GlobalKey<NavigatorState>();
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await NetworkManager.instance.updateBaseUrl();
+
+  NetworkManager.onUnauthorized = () {
+    CacheManager.clear().then((_) {
+      _navigatorKey.currentState?.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        (route) => false,
+      );
+    });
+  };
+
   runApp(const MyarapApp());
 }
 

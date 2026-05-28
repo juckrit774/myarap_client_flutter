@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../models/problem_model.dart';
+import '../../../../core/services/network_manager.dart';
+import '../../../../core/models/base_request_model.dart';
 
 class ProblemViewModel extends ChangeNotifier {
   bool isLoading = false;
@@ -12,11 +14,33 @@ class ProblemViewModel extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // API call would go here
-      await Future.delayed(const Duration(milliseconds: 400));
-      problems = ProblemModel.mockList();
+      final response = await NetworkManager.instance.request<List<ProblemModel>>(
+        request: BaseRequestModel(
+          module: 'ProblemTracking',
+          target: 'ClientProblemList',
+          token: token,
+          data: assetNo != null ? {'assetNo': assetNo} : {},
+        ),
+        parseEntries: (json) {
+          if (json is List) {
+            return json
+                .map((e) => ProblemModel.fromJson(e as Map<String, dynamic>))
+                .toList();
+          }
+          return [];
+        },
+        url: '/v2/api/Select',
+      );
+
+      if (response.isSuccess && response.entries != null) {
+        problems = response.entries!;
+      } else {
+        problems = [];
+        errorMessage = response.message.isNotEmpty ? response.message : 'โหลดข้อมูลไม่สำเร็จ';
+      }
     } catch (_) {
-      problems = ProblemModel.mockList();
+      problems = [];
+      errorMessage = 'ไม่สามารถเชื่อมต่อได้';
     }
 
     isLoading = false;

@@ -10,6 +10,10 @@ class NetworkManager {
   static final NetworkManager _instance = NetworkManager._();
   static NetworkManager get instance => _instance;
 
+  /// Called when any API response returns status 401 (token expired / unauthorized).
+  /// Wire this up in main() to clear credentials and navigate to the home screen.
+  static void Function()? onUnauthorized;
+
   NetworkManager._() {
     (_dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
       final client = HttpClient();
@@ -38,10 +42,11 @@ class NetworkManager {
   }) async {
     final endpoint = url ?? '/v2/api/AssetAuthen';
     final response = await _dio.post(endpoint, data: request.toJson());
-    return BaseResponseModel.fromJson(
+    final result = BaseResponseModel.fromJson(
       response.data as Map<String, dynamic>,
       parseEntries,
     );
+    return result;
   }
 
   Future<BaseResponseModel<T>> uploadMultipart<T>({
