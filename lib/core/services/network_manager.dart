@@ -57,7 +57,7 @@ class NetworkManager {
   }) async {
     final formData = FormData.fromMap({...fields, 'files': files});
     final response = await _dio.post(
-      '/api/upload',
+      '/v2/api/Upload',
       data: formData,
       onSendProgress: onProgress,
     );

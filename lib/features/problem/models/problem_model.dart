@@ -41,7 +41,7 @@ class ProblemModel {
               .toList() ??
           [],
       remark: json['remark'] as String? ?? '',
-      reporter: json['reporter'] as String? ?? '',
+      reporter: json['reporter']?.toString() ?? '',
       created: json['created'] != null
           ? DateTime.tryParse(json['created'].toString()) ?? DateTime.now()
           : DateTime.now(),

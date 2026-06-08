@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../models/image_model.dart';
@@ -92,7 +93,6 @@ class ReportViewModel extends ChangeNotifier {
     if (selectedProblems.isEmpty) return 'กรุณาเลือกประเภทปัญหาอย่างน้อย 1 รายการ';
     final requireRemark = selectedProblems.any((p) => p.requireRemark);
     if (requireRemark && remark.trim().isEmpty) return 'กรุณากรอกหมายเหตุสำหรับปัญหาที่เลือก';
-    if (images.isEmpty) return 'กรุณาแนบรูปภาพอย่างน้อย 1 รูป';
     return null;
   }
 
@@ -112,7 +112,8 @@ class ReportViewModel extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final response = await NetworkManager.instance.request<dynamic>(
+      // Step 1: Create problem record
+      final createResponse = await NetworkManager.instance.request<Map<String, dynamic>>(
         request: BaseRequestModel(
           module: 'ProblemTracking',
           target: 'CreateProblem',
@@ -123,22 +124,46 @@ class ReportViewModel extends ChangeNotifier {
             'remark': remark,
           },
         ),
-        parseEntries: (json) => json,
+        parseEntries: (json) => json is Map<String, dynamic> ? json : null,
         url: '/v2/api/Insert',
       );
 
-      if (response.status == 401) {
+      if (createResponse.status == 401) {
         isSending = false;
         notifyListeners();
         NetworkManager.onUnauthorized?.call();
         return false;
       }
 
-      if (!response.isSuccess) {
-        onError?.call(response.message.isNotEmpty ? response.message : 'ส่งรายงานไม่สำเร็จ');
+      if (!createResponse.isSuccess) {
+        onError?.call(createResponse.message.isNotEmpty ? createResponse.message : 'ส่งรายงานไม่สำเร็จ');
         isSending = false;
         notifyListeners();
         return false;
+      }
+
+      // Step 2: Upload images if any (optional)
+      if (images.isNotEmpty && createResponse.entries != null) {
+        final problemId = createResponse.entries!['id']?.toString();
+        if (problemId != null) {
+          final multipartFiles = await Future.wait(
+            images.map((img) => MultipartFile.fromFile(img.path, filename: img.fileName)),
+          );
+          await NetworkManager.instance.uploadMultipart<dynamic>(
+            fields: {
+              'module': 'ProblemTracking',
+              'target': 'UploadProblemImage',
+              'token': token,
+              'problem_id': problemId,
+            },
+            files: multipartFiles,
+            parseEntries: (json) => json,
+            onProgress: (sent, total) {
+              sendProgress = total > 0 ? sent / total : 0;
+              notifyListeners();
+            },
+          );
+        }
       }
 
       _reset();
