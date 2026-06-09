@@ -127,6 +127,22 @@ On launch, `HomeViewModel.initialize()`:
 | `com.myarap/device_info` | macOS, Windows | `getDeviceInfo` | Hardware/OS info |
 | `com.myarap/window` | macOS only | `openSetting` | macOS menu bar → Settings screen |
 
+### Windows system tray (minimize to tray)
+
+Implemented entirely in `windows/runner/win32_window.cpp` / `win32_window.h` — no Flutter/Dart changes required.
+
+- **Minimize → tray**: `WM_SIZE` with `SIZE_MINIMIZED` hides the window (`SW_HIDE`) and calls `Shell_NotifyIcon(NIM_ADD)` to add a tray icon.
+- **Restore**: left-click or double-click the tray icon calls `SW_RESTORE` + `SetForegroundWindow`.
+- **Context menu**: right-click shows **Open** / **Exit**; Exit posts `WM_CLOSE`.
+- **Cleanup**: `Destroy()` always calls `RemoveTrayIcon()` so the icon never lingers after the app exits.
+- Tray icon is loaded from the same `IDI_APP_ICON` resource used by the window title bar.
+
+### Windows app icon
+
+`windows/runner/resources/app_icon.ico` contains 7 sizes: **16, 24, 32, 48, 64, 128, 256 px** (32-bit RGBA, PNG-compressed inside the ICO container). Generated from `macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_1024.png` using Pillow + a manual ICO builder script (not checked in — re-run if the source icon changes).
+
+Referenced by `Runner.rc` as `IDI_APP_ICON` (resource ID 101); loaded by `WNDCLASSEX.hIcon` (large) and `WNDCLASSEX.hIconSm` (small/taskbar).
+
 ### Server URL configuration
 
 The backend URL defaults to `https://localhost:8000` (`AppConfig.baseUrl`). Users can change it at runtime in **Settings** → stored in SharedPreferences as `server_url` → picked up by `NetworkManager.updateBaseUrl()` on next launch (or immediately after saving).
