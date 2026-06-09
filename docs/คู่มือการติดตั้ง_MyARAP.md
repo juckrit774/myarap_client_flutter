@@ -44,23 +44,23 @@
 
 เนื่องจาก MyARAP เป็นซอฟต์แวร์ภายในองค์กรที่ไม่ได้ผ่าน Microsoft Store Windows อาจแสดงคำเตือนจาก SmartScreen
 
-**กรณีที่เห็นหน้าต่าง "Windows protected your PC":**
+**1. คลิก "More info" (ข้อมูลเพิ่มเติม)**
 
-1. คลิก **"More info"** (ข้อมูลเพิ่มเติม)
+![Windows SmartScreen — หน้าต่างคำเตือน "Windows protected your PC"](images/win_smartscreen_1.png)
 
-   ![SmartScreen More Info]
+**2. คลิกปุ่ม "Run anyway" (เรียกใช้งานต่อไป)**
 
-2. คลิกปุ่ม **"Run anyway"** (เรียกใช้งานต่อไป)
+![Windows SmartScreen — คลิก "More info" แล้วเห็นปุ่ม "Run anyway"](images/win_smartscreen_2.png)
 
-   ![SmartScreen Run Anyway]
+---
 
-> **หมายเหตุ:** หากไม่พบปุ่ม "Run anyway" ให้ทำตามขั้นตอนด้านล่าง
+> **หากไม่พบปุ่ม "Run anyway"** ให้ทำตามขั้นตอนด้านล่าง
 >
-> 1. คลิกขวาที่ไฟล์ `MyARAP_Setup.exe`
-> 2. เลือก **Properties** (คุณสมบัติ)
-> 3. แท็บ **General** เลื่อนลงมาด้านล่าง หัวข้อ **Security**
-> 4. ติ๊กถูก **Unblock** แล้วคลิก **OK**
-> 5. ดับเบิลคลิกเพื่อเรียกใช้งานไฟล์อีกครั้ง
+> 1. คลิกขวาที่ไฟล์ `MyARAP_Setup.exe` → เลือก **Properties**
+> 2. แท็บ **General** → หัวข้อ **Security** → ติ๊กถูก **Unblock**
+> 3. คลิก **OK** แล้วเปิดไฟล์อีกครั้ง
+>
+> ![File Properties — ช่อง Unblock ในแท็บ General](images/win_properties_unblock.png)
 
 ---
 
@@ -68,13 +68,20 @@
 
 1. ดับเบิลคลิกไฟล์ **`MyARAP_Setup.exe`**
 2. หากมีหน้าต่าง **User Account Control (UAC)** ปรากฏขึ้น คลิก **Yes**
+
+   ![User Account Control — คลิก Yes เพื่ออนุญาต](images/win_uac.png)
+
 3. หน้าต่าง Setup Wizard จะเปิดขึ้น คลิก **Next**
+
+   ![Setup Wizard — หน้า Welcome](images/win_installer_welcome.png)
+
 4. อ่านและยอมรับ License Agreement แล้วคลิก **Next**
 5. เลือกโฟลเดอร์ติดตั้ง (ค่าเริ่มต้น: `C:\Program Files\MyARAP`) แล้วคลิก **Next**
 6. เลือกว่าต้องการสร้าง **Desktop shortcut** หรือไม่ แล้วคลิก **Next**
 7. คลิก **Install** เพื่อเริ่มติดตั้ง
 8. เมื่อติดตั้งเสร็จ คลิก **Finish**
-   - สามารถเลือกติ๊ก **"Launch MyARAP"** เพื่อเปิดโปรแกรมทันที
+
+   ![Setup Wizard — หน้า Installation Complete](images/win_installer_finish.png)
 
 ---
 
@@ -93,9 +100,14 @@ msiexec /i MyARAP.msi /quiet /norestart
 
 MyARAP รองรับการย่อลง System Tray แทนการปิด
 
-- **กดปุ่ม Minimize (−):** โปรแกรมจะซ่อนลง System Tray ที่มุมขวาล่างของหน้าจอ
+![ไอคอน MyARAP ใน System Tray มุมขวาล่างของหน้าจอ](images/win_tray_icon.png)
+
+- **กดปุ่ม Minimize (−):** โปรแกรมจะซ่อนลง System Tray
 - **คลิกซ้าย** ที่ไอคอน Tray: เปิดหน้าต่างโปรแกรมขึ้นมา
 - **คลิกขวา** ที่ไอคอน Tray: แสดงเมนู
+
+  ![เมนูคลิกขวา System Tray แสดง Open และ Exit](images/win_tray_menu.png)
+
   - **Open** — เปิดหน้าต่างโปรแกรม
   - **Exit** — ปิดโปรแกรม
 
@@ -117,9 +129,13 @@ MyARAP รองรับการย่อลง System Tray แทนการ
 
 1. เปิดไฟล์ **`MyARAP.dmg`** และลาก **MyARAP.app** ไปวางใน **Applications**
 2. เปิดโฟลเดอร์ **Applications** ใน Finder
-3. **คลิกขวา** (หรือ Control+คลิก) ที่ **MyARAP.app**
-4. เลือก **Open** จากเมนู
-5. กล่องข้อความจะถามว่า "macOS cannot verify the developer" ให้คลิก **Open**
+3. **คลิกขวา** (หรือ Control+คลิก) ที่ **MyARAP.app** → เลือก **Open**
+
+   ![Finder — คลิกขวาที่ MyARAP.app แล้วเลือก Open](images/mac_rightclick_open.png)
+
+4. กล่องข้อความจะถามว่า "macOS cannot verify the developer" ให้คลิก **Open**
+
+   ![Dialog ยืนยัน — คลิก Open เพื่อเปิดโปรแกรม](images/mac_open_confirm.png)
 
 > หลังจากทำครั้งแรกแล้ว ครั้งต่อไปสามารถเปิดโปรแกรมได้ตามปกติ
 
@@ -129,27 +145,30 @@ MyARAP รองรับการย่อลง System Tray แทนการ
 
 หากเปิดโปรแกรมแล้วเห็นข้อความ **"MyARAP cannot be opened because it is from an unidentified developer"**
 
+![Dialog "MyARAP cannot be opened because it is from an unidentified developer"](images/mac_blocked_dialog.png)
+
 **macOS Ventura (13) ขึ้นไป:**
 
-1. เปิด  → **System Settings**
-2. เลือก **Privacy & Security** (ความเป็นส่วนตัวและความปลอดภัย)
-3. เลื่อนลงไปที่หัวข้อ **Security**
-4. จะเห็นข้อความ **"MyARAP was blocked from use because it is not from an identified developer"**
-5. คลิปปุ่ม **Open Anyway** (เปิดต่อไป)
-6. กรอกรหัสผ่าน Mac แล้วคลิก **OK**
+1. เปิด  → **System Settings** → **Privacy & Security**
+
+   ![System Settings — หน้า Privacy & Security](images/mac_system_settings.png)
+
+2. เลื่อนลงไปที่หัวข้อ **Security** จะเห็นปุ่ม **Open Anyway**
+3. คลิก **Open Anyway** แล้วกรอกรหัสผ่าน Mac
+
+   ![ปุ่ม Open Anyway ในหน้า Privacy & Security](images/mac_open_anyway.png)
 
 **macOS Monterey (12) หรือเก่ากว่า:**
 
-1. เปิด  → **System Preferences**
-2. เลือก **Security & Privacy**
-3. แท็บ **General** → คลิก 🔒 แล้วกรอกรหัสผ่านเพื่อปลดล็อก
-4. คลิก **Open Anyway** ที่อยู่ใต้ข้อความเตือน
+1. เปิด  → **System Preferences** → **Security & Privacy**
+2. แท็บ **General** → คลิก 🔒 แล้วกรอกรหัสผ่านเพื่อปลดล็อก
+3. คลิก **Open Anyway** ที่อยู่ใต้ข้อความเตือน
 
 ---
 
 #### วิธีที่ 3 — ใช้ Terminal (กรณีที่ปุ่มไม่ปรากฏ)
 
-เปิด **Terminal** แล้วรันคำสั่งต่อไปนี้:
+เปิด **Terminal** แล้วรันคำสั่ง:
 
 ```bash
 xattr -cr /Applications/MyARAP.app
@@ -162,11 +181,13 @@ xattr -cr /Applications/MyARAP.app
 ### ขั้นตอนที่ 3 — ติดตั้งโปรแกรม
 
 1. เปิดไฟล์ **`MyARAP.dmg`** โดยดับเบิลคลิก
-2. หน้าต่างจะแสดง MyARAP.app และโฟลเดอร์ Applications
-3. ลาก **MyARAP.app** ไปวางบนไอคอน **Applications**
-4. รอจนคัดลอกเสร็จ แล้วปิดหน้าต่าง DMG
-5. นำ DMG ออกจากระบบโดยคลิกขวาที่ DMG ใน Finder → **Eject**
-6. เปิดโปรแกรมจาก **Applications** หรือ **Launchpad**
+2. หน้าต่างจะแสดง MyARAP.app และโฟลเดอร์ Applications — ลาก **MyARAP.app** ไปวางบนไอคอน **Applications**
+
+   ![หน้าต่าง DMG — ลาก MyARAP.app ไปวางที่ Applications](images/mac_dmg_window.png)
+
+3. รอจนคัดลอกเสร็จ แล้วปิดหน้าต่าง DMG
+4. นำ DMG ออกจากระบบ: คลิกขวา DMG ใน Finder → **Eject**
+5. เปิดโปรแกรมจาก **Applications** หรือ **Launchpad**
 
 ---
 
