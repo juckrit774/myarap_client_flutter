@@ -2,6 +2,7 @@
 #define RUNNER_WIN32_WINDOW_H_
 
 #include <windows.h>
+#include <shellapi.h>
 
 #include <functional>
 #include <memory>
@@ -90,6 +91,14 @@ class Win32Window {
   // Update the window frame's theme to match the system theme.
   static void UpdateTheme(HWND const window);
 
+  // System tray helpers.
+  void AddTrayIcon();
+  void RemoveTrayIcon();
+  void RestoreFromTray();
+
+  // Message ID used for tray icon callbacks (WM_APP + 1).
+  static constexpr UINT kTrayCallbackMessage = WM_APP + 1;
+
   bool quit_on_close_ = false;
 
   // window handle for top level window.
@@ -97,6 +106,11 @@ class Win32Window {
 
   // window handle for hosted content.
   HWND child_content_ = nullptr;
+
+  // System tray state.
+  NOTIFYICONDATA nid_{};
+  bool tray_icon_active_ = false;
+  std::wstring window_title_;
 };
 
 #endif  // RUNNER_WIN32_WINDOW_H_

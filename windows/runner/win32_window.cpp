@@ -123,6 +123,38 @@ Win32Window::Win32Window() {
   ++g_active_window_count;
 }
 
+void Win32Window::AddTrayIcon() {
+  if (tray_icon_active_) return;
+  nid_.cbSize = sizeof(NOTIFYICONDATA);
+  nid_.hWnd = window_handle_;
+  nid_.uID = 1;
+  nid_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+  nid_.uCallbackMessage = kTrayCallbackMessage;
+  nid_.hIcon = static_cast<HICON>(LoadImage(
+      GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON),
+      IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+      LR_DEFAULTCOLOR));
+  wcsncpy_s(nid_.szTip, window_title_.c_str(), _TRUNCATE);
+  Shell_NotifyIcon(NIM_ADD, &nid_);
+  tray_icon_active_ = true;
+}
+
+void Win32Window::RemoveTrayIcon() {
+  if (!tray_icon_active_) return;
+  Shell_NotifyIcon(NIM_DELETE, &nid_);
+  if (nid_.hIcon) {
+    DestroyIcon(nid_.hIcon);
+    nid_.hIcon = nullptr;
+  }
+  tray_icon_active_ = false;
+}
+
+void Win32Window::RestoreFromTray() {
+  RemoveTrayIcon();
+  ShowWindow(window_handle_, SW_RESTORE);
+  SetForegroundWindow(window_handle_);
+}
+
 Win32Window::~Win32Window() {
   --g_active_window_count;
   Destroy();
@@ -132,6 +164,8 @@ bool Win32Window::Create(const std::wstring& title,
                          const Point& origin,
                          const Size& size) {
   Destroy();
+
+  window_title_ = title;
 
   const wchar_t* window_class =
       WindowClassRegistrar::GetInstance()->GetWindowClass();
@@ -206,6 +240,11 @@ Win32Window::MessageHandler(HWND hwnd,
       return 0;
     }
     case WM_SIZE: {
+      if (wparam == SIZE_MINIMIZED) {
+        ::ShowWindow(window_handle_, SW_HIDE);
+        AddTrayIcon();
+        return 0;
+      }
       RECT rect = GetClientArea();
       if (child_content_ != nullptr) {
         // Size and position the child window.
@@ -221,6 +260,34 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       return 0;
 
+    case kTrayCallbackMessage:
+      switch (LOWORD(lparam)) {
+        case WM_LBUTTONUP:
+        case WM_LBUTTONDBLCLK:
+          RestoreFromTray();
+          break;
+        case WM_RBUTTONUP: {
+          HMENU menu = CreatePopupMenu();
+          AppendMenuW(menu, MF_STRING, 1, L"Open");
+          AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+          AppendMenuW(menu, MF_STRING, 2, L"Exit");
+          SetForegroundWindow(window_handle_);
+          POINT pt;
+          GetCursorPos(&pt);
+          UINT cmd = TrackPopupMenu(
+              menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+              pt.x, pt.y, 0, window_handle_, nullptr);
+          DestroyMenu(menu);
+          if (cmd == 1) {
+            RestoreFromTray();
+          } else if (cmd == 2) {
+            PostMessage(window_handle_, WM_CLOSE, 0, 0);
+          }
+          break;
+        }
+      }
+      return 0;
+
     case WM_DWMCOLORIZATIONCOLORCHANGED:
       UpdateTheme(hwnd);
       return 0;
@@ -230,6 +297,7 @@ Win32Window::MessageHandler(HWND hwnd,
 }
 
 void Win32Window::Destroy() {
+  RemoveTrayIcon();
   OnDestroy();
 
   if (window_handle_) {
