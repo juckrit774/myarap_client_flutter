@@ -20,32 +20,35 @@ class ReportViewModel extends ChangeNotifier {
       problemTypes.where((p) => p.isSelected).toList();
 
   Future<void> loadProblemTypes({String? token}) async {
+    if (isLoading) return;
     isLoading = true;
     notifyListeners();
 
     try {
       final response = await NetworkManager.instance.request<List<MProblemModel>>(
         request: BaseRequestModel(
-          module: 'ProblemTracking',
-          target: 'MProblem',
           token: token,
           data: {},
         ),
         parseEntries: (json) {
           if (json is List) {
-            return json.map((e) => MProblemModel.fromJson(e as Map<String, dynamic>)).toList();
+            final seen = <String>{};
+            return json
+                .map((e) => MProblemModel.fromJson(e as Map<String, dynamic>))
+                .where((p) => seen.add(p.id))
+                .toList();
           }
           return [];
         },
-        url: '/v2/api/Select',
+        url: '/v2/api/MProblem',
       );
       if (response.isSuccess && response.entries != null) {
         problemTypes = response.entries!;
       } else {
-        problemTypes = MProblemModel.mockList();
+        problemTypes = [];
       }
     } catch (_) {
-      problemTypes = MProblemModel.mockList();
+      problemTypes = [];
     }
 
     isLoading = false;
@@ -115,17 +118,14 @@ class ReportViewModel extends ChangeNotifier {
       // Step 1: Create problem record
       final createResponse = await NetworkManager.instance.request<Map<String, dynamic>>(
         request: BaseRequestModel(
-          module: 'ProblemTracking',
-          target: 'CreateProblem',
           token: token,
           data: {
-            'assetNo': assetNo,
             'problems': selectedProblems.map((p) => p.id).toList(),
             'remark': remark,
           },
         ),
         parseEntries: (json) => json is Map<String, dynamic> ? json : null,
-        url: '/v2/api/Insert',
+        url: '/v2/api/CreateProblem',
       );
 
       if (createResponse.status == 401) {
@@ -151,8 +151,6 @@ class ReportViewModel extends ChangeNotifier {
           );
           await NetworkManager.instance.uploadMultipart<dynamic>(
             fields: {
-              'module': 'ProblemTracking',
-              'target': 'UploadProblemImage',
               'token': token,
               'problem_id': problemId,
             },

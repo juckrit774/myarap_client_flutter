@@ -16,10 +16,8 @@ class ProblemViewModel extends ChangeNotifier {
     try {
       final response = await NetworkManager.instance.request<List<ProblemModel>>(
         request: BaseRequestModel(
-          module: 'ProblemTracking',
-          target: 'ClientProblemList',
           token: token,
-          data: assetNo != null ? {'assetNo': assetNo} : {},
+          data: {},
         ),
         parseEntries: (json) {
           if (json is List) {
@@ -29,7 +27,7 @@ class ProblemViewModel extends ChangeNotifier {
           }
           return [];
         },
-        url: '/v2/api/Select',
+        url: '/v2/api/ClientProblemList',
       );
 
       if (response.isSuccess && response.entries != null) {

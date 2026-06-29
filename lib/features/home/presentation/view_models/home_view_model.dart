@@ -73,8 +73,6 @@ class HomeViewModel extends ChangeNotifier {
     try {
       final response = await NetworkManager.instance.request<LoginResponseModel>(
         request: BaseRequestModel(
-          module: 'Authentication',
-          target: 'LoginWithClient',
           token: null,
           data: _buildLoginPayload(d),
         ),
@@ -120,8 +118,6 @@ class HomeViewModel extends ChangeNotifier {
     try {
       final response = await NetworkManager.instance.request<UpdateDeviceResponse>(
         request: BaseRequestModel(
-          module: 'Asset',
-          target: 'UpdateDeviceInfo',
           token: lr.token,
           data: _buildUpdatePayload(d, lr),
         ),
