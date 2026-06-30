@@ -3,38 +3,28 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../../data/models/device_model.dart';
 import '../../../auth/models/login_response_model.dart';
-import '../../../../core/models/base_request_model.dart';
 import '../../../../core/services/network_manager.dart';
 import '../../../../core/storage/cache_manager.dart';
 
-class UpdateDeviceResponse {
-  final double dueDateTime;
-  final int? logId;
-
-  const UpdateDeviceResponse({required this.dueDateTime, this.logId});
-
-  factory UpdateDeviceResponse.fromJson(Map<String, dynamic> json) =>
-      UpdateDeviceResponse(
-        dueDateTime: (json['dueDateTime'] as num?)?.toDouble() ?? 0,
-        logId: json['logId'] as int?,
-      );
-}
+// heartbeat interval เมื่อ V3 ไม่ส่ง dueDateTime กลับมา
+const _kHeartbeatInterval = Duration(minutes: 10);
 
 class HomeViewModel extends ChangeNotifier {
   bool isLoading = true;
   String? errorMessage;
   String? assetUpdatedAt;
 
-  LoginResponseModel? loginResponse;
+  // V3 auth result
+  DeviceAuthResponse? _deviceAuth;
   DeviceDetail? deviceDetail;
 
   Timer? _heartbeatTimer;
 
-  String get userName => loginResponse?.fullName ?? 'MYARAP User';
-  String get assetNo => loginResponse?.assetNo ?? '-';
-  String? get profileImageUrl => loginResponse?.profileImageUrl;
-  DateTime? get lastUpdated => loginResponse?.lastUpdated;
-  String? get token => loginResponse?.token;
+  String get userName => deviceDetail?.computerName ?? _deviceAuth?.assetTag ?? 'MYARAP User';
+  String get assetNo => _deviceAuth?.assetTag ?? '-';
+  String? get profileImageUrl => null;
+  DateTime? get lastUpdated => null;
+  String? get accessToken => _deviceAuth?.accessToken;
 
   @override
   void dispose() {
@@ -48,7 +38,7 @@ class HomeViewModel extends ChangeNotifier {
     notifyListeners();
 
     await Future.wait([
-      _loadCachedLogin(),
+      _loadCachedAuth(),
       _loadDeviceInfo(),
     ]);
 
@@ -58,8 +48,13 @@ class HomeViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _loadCachedLogin() async {
-    loginResponse = await CacheManager.getLoginResponse();
+  Future<void> _loadCachedAuth() async {
+    final cached = await CacheManager.getDeviceAuth();
+    if (cached != null) {
+      _deviceAuth = DeviceAuthResponse.fromJson(cached);
+      // restore token ให้ NetworkManager ใช้ได้ทันทีโดยไม่ต้อง re-auth
+      NetworkManager.instance.setAccessToken(_deviceAuth!.accessToken);
+    }
   }
 
   Future<void> _loadDeviceInfo() async {
@@ -70,284 +65,91 @@ class HomeViewModel extends ChangeNotifier {
     final d = deviceDetail;
     if (d == null) return;
 
+    // fingerprint = serialNumber (หรือ hardwareUUID ถ้า serial ว่าง)
+    final fingerprint = d.serialNumber.isNotEmpty ? d.serialNumber : d.hardwareUUID;
+    if (fingerprint.isEmpty) {
+      errorMessage = 'ไม่พบ fingerprint ของเครื่อง';
+      return;
+    }
+
     try {
-      final response = await NetworkManager.instance.request<LoginResponseModel>(
-        request: BaseRequestModel(
-          token: null,
-          data: _buildLoginPayload(d),
-        ),
-        parseEntries: (json) => json != null
-            ? LoginResponseModel.fromJson(json as Map<String, dynamic>)
-            : null,
+      final data = await NetworkManager.instance.postV3Public(
+        '/v3/api/auth',
+        {'fingerprint': fingerprint},
       );
+      _deviceAuth = DeviceAuthResponse.fromJson(data);
+      NetworkManager.instance.setAccessToken(_deviceAuth!.accessToken);
+      await CacheManager.saveAccessToken(_deviceAuth!.accessToken);
+      await CacheManager.saveRefreshToken(_deviceAuth!.refreshToken);
+      await CacheManager.saveDeviceAuth(_deviceAuth!.toJson());
 
-      if (response.isSuccess && response.entries != null) {
-        loginResponse = response.entries!.copyWith(lastUpdated: DateTime.now());
-        await CacheManager.saveLoginResponse(loginResponse!);
-
-        // Notify server device is online — same flow as native app
-        await _updateDeviceInfo();
-      }
+      // รายงาน hardware info ทันทีหลัง auth สำเร็จ
+      await _updateDeviceInfo();
     } catch (_) {
-      if (loginResponse == null) {
-        loginResponse = LoginResponseModel(
-          assetNo: 'AST-00000',
-          computerName: d.computerName,
-          user: const LoginUser(
-            imageURL: '',
-            fullName: 'MYARAP User',
-            role: '',
-            config: UserConfig(imageReportLimit: 5),
-          ),
-          webService: const [],
-          token: '',
-          lastUpdated: DateTime.now(),
-        );
+      // ใช้ cached auth ถ้ามี — offline fallback
+      if (_deviceAuth == null) {
+        errorMessage = 'ไม่สามารถเชื่อมต่อได้ กรุณาตรวจสอบ Server URL';
       }
     }
   }
 
   Future<void> _updateDeviceInfo() async {
     final d = deviceDetail;
-    final lr = loginResponse;
-    if (d == null || lr == null) return;
-
-    final updateUrl = lr.getWebServiceUrl('UPDATE');
-    if (updateUrl == null || updateUrl.isEmpty) return;
+    if (d == null) return;
 
     try {
-      final response = await NetworkManager.instance.request<UpdateDeviceResponse>(
-        request: BaseRequestModel(
-          token: lr.token,
-          data: _buildUpdatePayload(d, lr),
-        ),
-        parseEntries: (json) => json != null
-            ? UpdateDeviceResponse.fromJson(json as Map<String, dynamic>)
-            : null,
-        url: updateUrl,
-      );
+      await NetworkManager.instance.putV3('/v3/api/device', _buildDevicePayload(d));
 
-      if (response.isSuccess && response.entries != null) {
-        final now = DateTime.now();
-        assetUpdatedAt =
-            '${now.month}/${now.day}/${now.year} ${now.hour}:${now.minute.toString().padLeft(2, '0')} '
-            '${now.hour >= 12 ? 'PM' : 'AM'}';
-        notifyListeners();
+      final now = DateTime.now();
+      assetUpdatedAt =
+          '${now.month}/${now.day}/${now.year} ${now.hour}:${now.minute.toString().padLeft(2, '0')} '
+          '${now.hour >= 12 ? 'PM' : 'AM'}';
+      notifyListeners();
 
-        _scheduleNextUpdate(response.entries!.dueDateTime);
-      }
+      // รายงาน installed software (opt-in)
+      await _reportSoftware(d);
+
+      // ตั้ง heartbeat ถัดไปด้วย fixed interval (V3 ไม่ส่ง dueDateTime กลับมา)
+      _scheduleHeartbeat();
     } catch (_) {
-      // Server unreachable — skip heartbeat
+      // server unreachable — heartbeat จะลองใหม่ตาม schedule
+      _scheduleHeartbeat();
     }
   }
 
-  // Mirror of native app's scheduleNextUpdate
-  void _scheduleNextUpdate(double dueDateTime) {
-    _heartbeatTimer?.cancel();
-    final delaySeconds = dueDateTime - (DateTime.now().millisecondsSinceEpoch / 1000);
-    if (delaySeconds <= 0) {
-      _updateDeviceInfo();
-      return;
-    }
-    _heartbeatTimer = Timer(Duration(seconds: delaySeconds.toInt()), () {
-      _updateDeviceInfo();
-    });
-  }
-
-  // Replicates Swift's String.capitalized: uppercases first char of each word
-  // (words split by hyphen, space, underscore), lowercases the rest.
-  // Native app applies this to fullDeviceName via Host.current().name.capitalized.
-  String _capitalized(String s) {
-    if (s.isEmpty) return s;
-    final sb = StringBuffer();
-    bool newWord = true;
-    for (final rune in s.runes) {
-      final ch = String.fromCharCode(rune);
-      if (ch == '-' || ch == ' ' || ch == '_') {
-        sb.write(ch);
-        newWord = true;
-      } else if (newWord) {
-        sb.write(ch.toUpperCase());
-        newWord = false;
-      } else {
-        sb.write(ch.toLowerCase());
-      }
-    }
-    return sb.toString();
-  }
-
-  Map<String, dynamic> _buildLoginPayload(DeviceDetail d) {
-    final osVer = d.osVersion.replaceAll('macOS ', '');
-    final cores = int.tryParse(d.totalCores.split(' ').first) ?? 0;
-    final memGB = int.tryParse(
-            d.memory.replaceAll(' GB', '').replaceAll('GB', '').trim()) ??
-        0;
-
-    return {
-      'userLogOn': d.fullUserName,
-      'assetNumber': d.localizedName.isNotEmpty ? d.localizedName : d.computerName,
-      'deviceInfo': _deviceInfoPayload(d, osVer, cores, memGB),
-      'network': {
-        'publicIP': d.ipAddress,
-        'privateIP': [],
-        'uniqueId': 0,
-        'active': false,
-      },
-      'location': null,
-      'fullDeviceName': _capitalized(d.hostName.replaceAll('.local', '')),
-      'uniqueId': 0,
-      'active': false,
-    };
-  }
-
-  Map<String, dynamic> _buildUpdatePayload(DeviceDetail d, LoginResponseModel lr) {
-    final osVer = d.osVersion.replaceAll('macOS ', '');
-    final cores = int.tryParse(d.totalCores.split(' ').first) ?? 0;
-    final memGB = int.tryParse(
-            d.memory.replaceAll(' GB', '').replaceAll('GB', '').trim()) ??
-        0;
-
-    return {
-      'deviceInfo': _deviceInfoPayload(d, osVer, cores, memGB),
-      'network': {
-        'publicIP': d.ipAddress,
-        'privateIP': [],
-        'uniqueId': 0,
-        'active': false,
-      },
-      'location': null,
-      'applications': d.applications
+  Future<void> _reportSoftware(DeviceDetail d) async {
+    if (d.applications.isEmpty) return;
+    try {
+      final items = d.applications
           .map((app) => {
-                'vendor': '',
                 'name': app.name,
-                'size': app.size,
+                'vendor': '',
                 'version': app.version,
-                'installDate': 0,
-                'uniqueId': 0,
-                'active': false,
+                'size': app.size,
               })
-          .toList(),
-      'curerntUserLogOn': lr.user.fullName,
-      'computerName': d.modelName,
-      'fullDeviceName': _capitalized(d.hostName.replaceAll('.local', '')),
-      'uniqueId': 0,
-      'active': false,
-    };
+          .toList();
+      await NetworkManager.instance.putV3('/v3/api/device/software', {'software': items});
+    } catch (_) {
+      // ไม่ block — software report เป็น optional
+    }
   }
 
-  Map<String, dynamic> _deviceInfoPayload(
-      DeviceDetail d, String osVer, int cores, int memGB) {
+  void _scheduleHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer(_kHeartbeatInterval, () => _updateDeviceInfo());
+  }
+
+  Map<String, dynamic> _buildDevicePayload(DeviceDetail d) {
     final isWindows = Platform.isWindows;
-    final manufacturer = isWindows
-        ? (d.vendor.isNotEmpty ? d.vendor : 'Microsoft')
-        : 'APPLE';
-    final osPlatform = isWindows ? 'Windows' : 'macOS';
-    final osName = isWindows ? 'Windows' : 'macOS';
     return {
-      'model': d.modelIdentifier,
-      'manufacturer': manufacturer,
+      'hostname': d.computerName,
+      'os': d.osVersion,
       'serialNumber': d.serialNumber,
-      'uuid': d.hardwareUUID,
-      'sku': '',
-      'board': {
-        'manufacturer': '',
-        'model': '',
-        'version': '',
-        'serialNumber': '',
-        'uniqueId': 0,
-        'active': false,
-      },
-      'os': {
-        'manufacturer': '',
-        'platform': osPlatform,
-        'name': osName,
-        'version': osVer,
-        'arch': d.cpuArchitecture,
-        'serial': '',
-        'installDate': 0,
-        'productType': '',
-        'uniqueId': 0,
-        'active': false,
-      },
-      'cpu': {
-        'manufacturer': '',
-        'brand': d.processorDisplay,
-        'vendor': d.vendor,
-        'model': 0,
-        'stepping': 0,
-        'speed': double.tryParse(d.cpuFrequency) ?? 0.0,
-        'speedmin': int.tryParse(d.cpuFrequencyMin) ?? 0,
-        'speedmax': double.tryParse(d.cpuFrequencyMax) ?? 0.0,
-        'governor': '',
-        'cores': cores,
-        'physicalCores': cores,
-        'processors': 0,
-        'socket': '',
-        'uniqueId': 0,
-        'active': false,
-      },
-      'graphics': {
-        'controllers': [
-          {
-            'infSection': '',
-            'deviceID': '',
-            'vendor': '',
-            'model': d.gpu,
-            'bus': '',
-            'vram': 0,
-            'vramDynamic': false,
-            'driverDate': 0,
-            'driverVersion': '',
-            'uniqueId': 0,
-            'active': false,
-          }
-        ],
-        'displays': d.displaysDetail
-            .map((disp) => {
-                  'deviceID': disp.name,
-                  'vendor': '',
-                  'model': disp.name,
-                  'main': false,
-                  'builtin': disp.builtin,
-                  'connection': '',
-                  'pixeldepth': 0,
-                  'resolutionx': disp.resolutionX,
-                  'resolutiony': disp.resolutionY,
-                  'currentResX': 0,
-                  'currentResY': 0,
-                  'uniqueId': 0,
-                  'active': false,
-                })
-            .toList(),
-        'uniqueId': 0,
-        'active': false,
-      },
-      'memory': [
-        {
-          'manufacturer': d.memoryManufacturer,
-          'bank': '',
-          'type': d.memoryType,
-          'size': memGB * 1024 * 1024 * 1024,
-          'clockSpeed': 0,
-          'partNum': '',
-          'serialNumber': '',
-          'uniqueId': 0,
-          'active': false,
-        }
-      ],
-      'storage': [
-        {
-          'vendor': '',
-          'name': d.storageName,
-          'type': d.storageType,
-          'size': d.storageCapacityBytes,
-          'serialNumber': '',
-          'uniqueId': 0,
-          'active': false,
-        }
-      ],
-      'uniqueId': 0,
-      'active': false,
+      'model': d.modelIdentifier,
+      'brand': isWindows ? (d.vendor.isNotEmpty ? d.vendor : 'Microsoft') : 'Apple',
+      'cpu': d.processorDisplay,
+      'ram': d.memory,
+      'agentVersion': '3.0.0',
     };
   }
 

@@ -1,44 +1,27 @@
 import 'package:flutter/material.dart';
 import '../../models/problem_model.dart';
 import '../../../../core/services/network_manager.dart';
-import '../../../../core/models/base_request_model.dart';
 
 class ProblemViewModel extends ChangeNotifier {
   bool isLoading = false;
   List<ProblemModel> problems = [];
   String? errorMessage;
 
-  Future<void> loadProblems({String? token, String? assetNo}) async {
+  /// โหลด ticket list ของ device นี้จาก GET /v3/api/tickets
+  Future<void> loadProblems() async {
     isLoading = true;
     errorMessage = null;
     notifyListeners();
 
     try {
-      final response = await NetworkManager.instance.request<List<ProblemModel>>(
-        request: BaseRequestModel(
-          token: token,
-          data: {},
-        ),
-        parseEntries: (json) {
-          if (json is List) {
-            return json
-                .map((e) => ProblemModel.fromJson(e as Map<String, dynamic>))
-                .toList();
-          }
-          return [];
-        },
-        url: '/v2/api/ClientProblemList',
-      );
-
-      if (response.isSuccess && response.entries != null) {
-        problems = response.entries!;
-      } else {
-        problems = [];
-        errorMessage = response.message.isNotEmpty ? response.message : 'โหลดข้อมูลไม่สำเร็จ';
-      }
+      final data = await NetworkManager.instance.getV3('/v3/api/tickets');
+      final list = data['data'] as List<dynamic>? ?? [];
+      problems = list
+          .map((e) => ProblemModel.fromJson(e as Map<String, dynamic>))
+          .toList();
     } catch (_) {
       problems = [];
-      errorMessage = 'ไม่สามารถเชื่อมต่อได้';
+      errorMessage = 'ไม่สามารถโหลดรายการได้';
     }
 
     isLoading = false;

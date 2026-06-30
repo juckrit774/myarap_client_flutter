@@ -89,7 +89,7 @@ class _HomeView extends StatelessWidget {
         IconButton(
           icon: const Icon(Icons.qr_code, color: Colors.white),
           tooltip: 'QR Code',
-          onPressed: () => _showQRCode(context, vm.token ?? ''),
+          onPressed: () => _showQRCode(context, vm.accessToken ?? ''),
         ),
         IconButton(
           icon: const Icon(Icons.notifications_outlined, color: Colors.white),
@@ -97,7 +97,7 @@ class _HomeView extends StatelessWidget {
           onPressed: () => Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => NotificationScreen(token: vm.token),
+              builder: (_) => NotificationScreen(token: vm.accessToken),
             ),
           ),
         ),
@@ -456,10 +456,7 @@ class _ActionButtons extends StatelessWidget {
               onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => ProblemScreen(
-                    token: vm.token,
-                    assetNo: vm.assetNo,
-                  ),
+                  builder: (_) => const ProblemScreen(),
                 ),
               ),
             ),
@@ -478,10 +475,7 @@ class _ActionButtons extends StatelessWidget {
               onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => ReportScreen(
-                    token: vm.token ?? '',
-                    assetNo: vm.assetNo,
-                  ),
+                  builder: (_) => const ReportScreen(),
                 ),
               ),
             ),

@@ -27,25 +27,35 @@ class ProblemModel {
     this.computerName,
   });
 
+  /// รองรับทั้ง V2 format และ V3 ticket format `{id, number, title, status, priority, createdAt}`
   factory ProblemModel.fromJson(Map<String, dynamic> json) {
+    // V3 ticket fields
+    final v3Id = json['id']?.toString();
+    final v3Number = json['number'] as String?;
+    final v3Title = json['title'] as String?;
+    final v3Status = json['status'] as String?;
+    final v3CreatedAt = json['createdAt'] as String?;
+
     return ProblemModel(
-      id: json['uniqueId']?.toString() ?? '',
-      problemNo: json['problemNo'] as String? ?? '',
+      id: v3Id ?? json['uniqueId']?.toString() ?? '',
+      problemNo: v3Number ?? json['problemNo'] as String? ?? '',
       assetNo: json['assetNo'] as String? ?? '',
-      problemList: (json['problemList'] as List<dynamic>?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          [],
+      problemList: v3Title != null
+          ? [v3Title]
+          : (json['problemList'] as List<dynamic>?)
+                  ?.map((e) => e.toString())
+                  .toList() ??
+              [],
       imageList: (json['imageList'] as List<dynamic>?)
               ?.map((e) => e.toString())
               .toList() ??
           [],
-      remark: json['remark'] as String? ?? '',
-      reporter: json['reporter']?.toString() ?? '',
-      created: json['created'] != null
-          ? DateTime.tryParse(json['created'].toString()) ?? DateTime.now()
+      remark: json['remark'] as String? ?? json['description'] as String? ?? '',
+      reporter: json['reporter']?.toString() ?? json['requesterId']?.toString() ?? '',
+      created: (v3CreatedAt ?? json['created'])?.toString() != null
+          ? DateTime.tryParse((v3CreatedAt ?? json['created']).toString()) ?? DateTime.now()
           : DateTime.now(),
-      currentStatus: json['currentStatus'] as String? ?? 'Open',
+      currentStatus: v3Status ?? json['currentStatus'] as String? ?? 'Open',
       openChatLink: json['openChatLink'] as String?,
       computerName: json['computerName'] as String?,
     );

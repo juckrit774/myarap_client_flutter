@@ -11,9 +11,10 @@ class MProblemModel {
     this.isSelected = false,
   });
 
+  /// รองรับทั้ง V2 `{uniqueID, name, requireRemark}` และ V3 `{id, code, name}`
   factory MProblemModel.fromJson(Map<String, dynamic> json) {
     return MProblemModel(
-      id: (json['uniqueID'] ?? json['uniqueId'] ?? '').toString(),
+      id: (json['id'] ?? json['uniqueID'] ?? json['uniqueId'] ?? '').toString(),
       name: json['name'] as String? ?? '',
       requireRemark: json['requireRemark'] is bool
           ? json['requireRemark'] as bool

@@ -8,16 +8,13 @@ import '../view_models/problem_view_model.dart';
 import 'problem_detail_screen.dart';
 
 class ProblemScreen extends StatelessWidget {
-  final String? token;
-  final String? assetNo;
-
-  const ProblemScreen({super.key, this.token, this.assetNo});
+  // V3: ไม่ต้องส่ง token/assetNo — NetworkManager จัดการ Bearer JWT เอง
+  const ProblemScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
-      create: (_) =>
-          ProblemViewModel()..loadProblems(token: token, assetNo: assetNo),
+      create: (_) => ProblemViewModel()..loadProblems(),
       child: const _ProblemView(),
     );
   }

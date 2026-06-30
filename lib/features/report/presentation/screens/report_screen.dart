@@ -9,25 +9,20 @@ import '../view_models/report_view_model.dart';
 import 'select_problem_screen.dart';
 
 class ReportScreen extends StatelessWidget {
-  final String token;
-  final String assetNo;
-
-  const ReportScreen({super.key, required this.token, required this.assetNo});
+  // V3: ไม่ต้องส่ง token/assetNo — NetworkManager จัดการ Bearer JWT เอง
+  const ReportScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
-      create: (_) => ReportViewModel()..loadProblemTypes(token: token),
-      child: _ReportView(token: token, assetNo: assetNo),
+      create: (_) => ReportViewModel()..loadProblemTypes(),
+      child: const _ReportView(),
     );
   }
 }
 
 class _ReportView extends StatefulWidget {
-  final String token;
-  final String assetNo;
-
-  const _ReportView({required this.token, required this.assetNo});
+  const _ReportView();
 
   @override
   State<_ReportView> createState() => _ReportViewState();
@@ -265,8 +260,6 @@ class _ReportViewState extends State<_ReportView> {
             ? null
             : () async {
                 final success = await vm.sendReport(
-                  token: widget.token,
-                  assetNo: widget.assetNo,
                   onError: (msg) => ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text(msg),
