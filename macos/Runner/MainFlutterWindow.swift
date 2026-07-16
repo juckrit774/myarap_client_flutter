@@ -210,9 +210,12 @@ enum RemoteConsent {
   static func showIndicator(viewer: String) {
     DispatchQueue.main.async {
       hideIndicatorNow()
+      dlog("[MYARAP-RD] showIndicator screens=\(NSScreen.screens.count)")
       for screen in NSScreen.screens {
+        dlog("[MYARAP-RD] banner on screen frame=\(screen.frame)")
         indicatorWindows.append(makeBanner(on: screen, viewer: viewer))
       }
+      dlog("[MYARAP-RD] banners created=\(indicatorWindows.count)")
     }
   }
 
@@ -512,6 +515,9 @@ class MainFlutterWindow: NSWindow {
     // Remote Desktop channel (Flutter → Swift): capture หน้าจอ → JPEG data URL (view-only)
     let remoteChannel = FlutterMethodChannel(name: "com.myarap/remote", binaryMessenger: messenger)
     remoteChannel.setMethodCallHandler { call, result in
+      if call.method != "captureScreen" { // captureScreen ถี่เกิน ไม่ log
+        dlog("[MYARAP-RD] channel call: \(call.method)")
+      }
       switch call.method {
       case "startCapture":
         // เริ่ม SCStream (indicator ม่วงขึ้น) — macOS 12.3+; OS เก่ากว่าใช้ one-shot fallback
