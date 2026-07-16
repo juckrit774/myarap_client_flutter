@@ -235,7 +235,7 @@ $pid = [uint32]0
       try {
         final proc = await Process.run(
           'powershell',
-          ['-NoProfile', '-NonInteractive', '-Command', script],
+          _psArgs(script, hidden: true),
           stdoutEncoding: const SystemEncoding(),
         );
         final app = proc.stdout.toString().trim();
@@ -290,7 +290,7 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
 ''';
     try {
       final proc = await Process.run('powershell',
-          ['-NoProfile', '-NonInteractive', '-Command', script],
+          _psArgs(script, hidden: true),
           stdoutEncoding: const SystemEncoding());
       final lines = proc.stdout.toString().split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty);
       for (final line in lines) {
@@ -325,7 +325,7 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
       try {
         final proc = await Process.run(
           'powershell',
-          ['-NoProfile', '-NonInteractive', '-Command', script],
+          _psArgs(script, hidden: true),
           stdoutEncoding: const SystemEncoding(),
         );
         final lines = proc.stdout
@@ -463,6 +463,21 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
 
   // ── consent / indicator / capture — branch ตาม platform ──
 
+  // สร้าง args สำหรับ powershell แบบ -EncodedCommand (base64 UTF-16LE)
+  // เลี่ยงปัญหา encoding ภาษาไทย + quote ที่ผ่าน -Command args บน Windows ไม่ได้ (ทำ MessageBox
+  // ไม่โผล่/parse พัง). `-STA` = WinForms ต้องการ; hidden = ซ่อน console window (กัน flash)
+  List<String> _psArgs(String script, {bool hidden = false}) {
+    final bytes = <int>[];
+    for (final cu in script.codeUnits) {
+      bytes.add(cu & 0xFF);
+      bytes.add((cu >> 8) & 0xFF);
+    }
+    final args = ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass'];
+    if (hidden) args.addAll(['-WindowStyle', 'Hidden']);
+    args.addAll(['-EncodedCommand', base64.encode(bytes)]);
+    return args;
+  }
+
   Future<bool> _requestRemoteConsent(String viewer) async {
     if (Platform.isMacOS) {
       try {
@@ -472,15 +487,19 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
       }
     }
     if (Platform.isWindows) {
-      // PowerShell MessageBox (blocking) — คืน ACCEPT/DENY ทาง stdout
+      // PowerShell MessageBox (blocking, topmost) — คืน ACCEPT/DENY ทาง stdout
+      // ใช้ owner form TopMost เพื่อให้ dialog โผล่หน้าสุด (ไม่งั้นอาจซ่อนหลังหน้าต่างอื่น)
+      final safeViewer = viewer.replaceAll("'", "''"); // กัน single-quote ทำ PS string พัง
       final script = '''
 Add-Type -AssemblyName System.Windows.Forms
-\$r = [System.Windows.Forms.MessageBox]::Show("ผู้ดูแลระบบ \\"$viewer\\" ขอเข้าดูหน้าจอของคุณ (ดูอย่างเดียว ควบคุมไม่ได้)`n`nอนุญาตหรือไม่?", "คำขอเข้าดูหน้าจอ", 'YesNo', 'Warning')
-if (\$r -eq 'Yes') { 'ACCEPT' } else { 'DENY' }
+\$owner = New-Object System.Windows.Forms.Form
+\$owner.TopMost = \$true
+\$msg = "ผู้ดูแลระบบ '$safeViewer' ขอเข้าดูหน้าจอของคุณ (ดูอย่างเดียว ควบคุมไม่ได้)`n`nอนุญาตหรือไม่?"
+\$r = [System.Windows.Forms.MessageBox]::Show(\$owner, \$msg, "คำขอเข้าดูหน้าจอ", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY' }
 ''';
       try {
-        final proc = await Process.run('powershell',
-            ['-NoProfile', '-NonInteractive', '-Command', script],
+        final proc = await Process.run('powershell', _psArgs(script, hidden: true),
             stdoutEncoding: const SystemEncoding());
         return proc.stdout.toString().trim() == 'ACCEPT';
       } catch (_) {
@@ -501,6 +520,7 @@ if (\$r -eq 'Yes') { 'ACCEPT' } else { 'DENY' }
       // topmost banner form แบบ detached — แสดง "🔴 กำลังถูกดู" จนกว่าจะ kill process ตอน stop
       // ⚠️ ไม่มีปุ่มหยุดโต้ตอบกลับ Dart (PowerShell form call กลับ Dart ไม่ได้) — Disconnect
       //    ฝั่ง Windows agent = future; ปัจจุบันตัดได้จากฝั่ง admin เท่านั้น
+      final safeViewer = viewer.replaceAll('"', '');
       final script = '''
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -515,7 +535,7 @@ Add-Type -AssemblyName System.Drawing
 \$f.Location = New-Object System.Drawing.Point([int](\$sw/2 - 210), 6)
 \$f.BackColor = [System.Drawing.Color]::FromArgb(217, 31, 64)
 \$lbl = New-Object System.Windows.Forms.Label
-\$lbl.Text = "  🔴  หน้าจอกำลังถูกดูโดย $viewer"
+\$lbl.Text = "  * หน้าจอกำลังถูกดูโดย $safeViewer"
 \$lbl.ForeColor = 'White'
 \$lbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
 \$lbl.Dock = 'Fill'
@@ -525,8 +545,7 @@ Add-Type -AssemblyName System.Drawing
 ''';
       try {
         // ไม่ await — form.Run บล็อกจนกว่า process ถูก kill
-        _winIndicatorProc = await Process.start(
-            'powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script]);
+        _winIndicatorProc = await Process.start('powershell', _psArgs(script, hidden: true));
       } catch (_) {}
       return;
     }
@@ -605,8 +624,8 @@ $bmp.Save($ms, $enc, $ep)
 [Convert]::ToBase64String($ms.ToArray())
 ''';
       try {
-        final proc = await Process.run('powershell',
-            ['-NoProfile', '-NonInteractive', '-Command', script],
+        // encoded + hidden — กัน console window flash ทุกเฟรม (400ms)
+        final proc = await Process.run('powershell', _psArgs(script, hidden: true),
             stdoutEncoding: const SystemEncoding());
         final b64 = proc.stdout.toString().trim();
         if (b64.isEmpty) return null;
