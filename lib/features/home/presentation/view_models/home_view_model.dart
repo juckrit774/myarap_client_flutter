@@ -267,9 +267,9 @@ $pid = [uint32]0
     }
   }
 
-  // Windows USB policy — mirror โครงสร้าง macOS (veto อนาคต + active unmount ปัจจุบัน)
-  // ⚠️ ทั้งสองส่วนต้องการสิทธิ์ Administrator (reg add USBSTOR + mountvol /P) — ถ้า agent
-  // ไม่ได้รันแบบ elevated จะเงียบ (Process คืน non-zero, catch ทิ้ง). ยังไม่ทดสอบบน Windows จริง
+  // Windows USB policy — veto อนาคต + active eject ปัจจุบัน (block) / rescan remount (unblock)
+  // ⚠️ ทุกส่วนต้องการสิทธิ์ Administrator (reg USBSTOR + eject + pnputil) — ถ้า agent ไม่ได้
+  // รันแบบ elevated จะเงียบ (Process คืน non-zero, catch ทิ้ง). ยังไม่ทดสอบบน Windows จริง
   Future<void> _applyWindowsUsbPolicy(bool block) async {
     // 1) veto การเสียบใหม่ในอนาคต: USBSTOR driver Start = 4 (disabled) / 3 (enabled)
     //    = วิธีมาตรฐานองค์กรปิด USB mass storage; กระทบเฉพาะ device ที่ยังไม่โหลด driver
@@ -280,8 +280,17 @@ $pid = [uint32]0
         '/v', 'Start', '/t', 'REG_DWORD', '/d', startVal, '/f',
       ]);
     } catch (_) {}
-    // 2) active unmount drive ที่ mount ค้างอยู่แล้วทันทีตอนสั่ง Block (mirror ejectAllMatchingDisksNow)
-    if (block) await _dismountAllWindowsRemovable();
+    if (block) {
+      // 2a) block: eject drive ที่ mount ค้างอยู่แล้วทันที (device หายจาก Explorer)
+      await _dismountAllWindowsRemovable();
+    } else {
+      // 2b) unblock: rescan hardware → device ที่ยังเสียบอยู่ทางกายภาพ (แค่ถูก eject ออกจาก
+      //     stack) ถูก re-enumerate + mount กลับเอง โดยไม่ต้องถอด-เสียบใหม่.
+      //     ต้องทำหลัง set USBSTOR Start=3 (driver enabled) เท่านั้น — ไม่งั้น driver ไม่โหลด
+      try {
+        await Process.run('pnputil', ['/scan-devices']); // built-in Windows 10 1607+
+      } catch (_) {}
+    }
   }
 
   // Eject drive ออกจริง (Safely Remove Hardware) ผ่าน Shell verb — device หายจาก Explorer สนิท
