@@ -267,78 +267,52 @@ $pid = [uint32]0
     }
   }
 
-  // Windows USB policy — veto อนาคต + active eject ปัจจุบัน (block) / rescan remount (unblock)
-  // ⚠️ ทุกส่วนต้องการสิทธิ์ Administrator (reg USBSTOR + eject + pnputil) — ถ้า agent ไม่ได้
-  // รันแบบ elevated จะเงียบ (Process คืน non-zero, catch ทิ้ง). ยังไม่ทดสอบบน Windows จริง
+  // Windows USB policy — block = Disable-PnpDevice (device หายจาก Explorer แต่ reversible),
+  // unblock = Enable-PnpDevice (mount กลับทันทีโดย software ไม่ต้องถอด-เสียบ).
+  //
+  // ⚠️ เลิกใช้ Shell "Eject" verb (Safely Remove Hardware) แล้ว — user ทดสอบจริงพบว่ามันเป็น
+  //    hardware-level removal → Windows มองว่า device ถูกถอดจริง → pnputil /scan-devices ไม่
+  //    re-mount ให้ (ต้อง physical replug เหมือน macOS diskutil eject). Disable/Enable-PnpDevice
+  //    เป็น software-level toggle ที่ reversible — Disable = หายจาก Explorer, Enable = กลับมาเลย.
+  // ⚠️ ต้องการสิทธิ์ Administrator — ไม่ elevated = เงียบ (Process non-zero, catch ทิ้ง)
   Future<void> _applyWindowsUsbPolicy(bool block) async {
-    // 1) veto การเสียบใหม่ในอนาคต: USBSTOR driver Start = 4 (disabled) / 3 (enabled)
-    //    = วิธีมาตรฐานองค์กรปิด USB mass storage; กระทบเฉพาะ device ที่ยังไม่โหลด driver
-    final startVal = block ? '4' : '3';
-    try {
-      await Process.run('reg', [
-        'add', r'HKLM\SYSTEM\CurrentControlSet\Services\USBSTOR',
-        '/v', 'Start', '/t', 'REG_DWORD', '/d', startVal, '/f',
-      ]);
-    } catch (_) {}
     if (block) {
-      // 2a) block: eject drive ที่ mount ค้างอยู่แล้วทันที (device หายจาก Explorer)
-      await _dismountAllWindowsRemovable();
+      await _disableWindowsUsbDrives();
     } else {
-      // 2b) unblock: rescan hardware → device ที่ยังเสียบอยู่ทางกายภาพ (แค่ถูก eject ออกจาก
-      //     stack) ถูก re-enumerate + mount กลับเอง โดยไม่ต้องถอด-เสียบใหม่.
-      //     ต้องทำหลัง set USBSTOR Start=3 (driver enabled) เท่านั้น — ไม่งั้น driver ไม่โหลด
-      try {
-        await Process.run('pnputil', ['/scan-devices']); // built-in Windows 10 1607+
-      } catch (_) {}
+      await _enableWindowsUsbDrives();
     }
   }
 
-  // Eject drive ออกจริง (Safely Remove Hardware) ผ่าน Shell verb — device หายจาก Explorer สนิท
-  // (ต่างจาก mountvol /P ที่แค่ dismount → ยังเห็น icon แต่เปิดไม่ได้). ไม่ลบ/format ข้อมูลใดๆ
-  // ⚠️ verb name ต่างตาม locale (EN "Eject" / TH "นำสื่อออก"/"นำออก") → loop verbs match pattern
-  //    ปลอดภัยกว่า InvokeVerb("Eject") ตรงๆ; fallback InvokeVerb + mountvol /P ถ้า eject ไม่ได้
-  Future<void> _ejectWindowsDrive(String letter) async {
-    final l = letter.replaceAll(':', '').replaceAll('\\', '');
-    final script = '''
-\$ErrorActionPreference = 'SilentlyContinue'
-\$sh = New-Object -ComObject Shell.Application
-\$item = \$sh.Namespace(17).ParseName("$l:")
-if (\$item) {
-  \$done = \$false
-  foreach (\$v in \$item.Verbs()) {
-    \$n = \$v.Name -replace '&',''
-    if (\$n -match 'Eject|นำสื่อออก|นำออก|ดีดออก') { \$v.DoIt(); \$done = \$true; break }
+  // Disable USB mass-storage disk ทุกตัวที่เสียบอยู่ (present + status OK) → หายจาก Explorer.
+  // คืน FriendlyName ของแต่ละตัวที่ disable → report เป็น block event. reversible ด้วย Enable.
+  Future<void> _disableWindowsUsbDrives() async {
+    const script = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+Get-PnpDevice -Class DiskDrive -PresentOnly | Where-Object { $_.InstanceId -like 'USBSTOR\*' -and $_.Status -eq 'OK' } | ForEach-Object {
+  Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false
+  $_.FriendlyName
+}
+''';
+    try {
+      final proc = await Process.run('powershell', _psArgs(script, hidden: true),
+          stdoutEncoding: const SystemEncoding());
+      final names = proc.stdout.toString().split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty);
+      for (final name in names) {
+        await _reportUsbBlock(name);
+      }
+    } catch (_) {}
   }
-  if (-not \$done) { \$item.InvokeVerb("Eject") }
+
+  // Enable USB mass-storage disk ที่ถูก disable ไว้ (status != OK) → mount กลับทันที
+  Future<void> _enableWindowsUsbDrives() async {
+    const script = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+Get-PnpDevice -Class DiskDrive | Where-Object { $_.InstanceId -like 'USBSTOR\*' -and $_.Status -ne 'OK' } | ForEach-Object {
+  Enable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false
 }
 ''';
     try {
       await Process.run('powershell', _psArgs(script, hidden: true));
-    } catch (_) {}
-    // เผื่อ eject verb ไม่ทำงาน (บาง drive/บาง Windows) — dismount + กัน remount เป็น fallback
-    try {
-      await Process.run('mountvol', ['$l:\\', '/P']);
-    } catch (_) {}
-  }
-
-  // ไล่ eject ทุก removable drive ที่ mount อยู่ตอนนี้ + รายงาน (เรียกตอน policy flip → block)
-  Future<void> _dismountAllWindowsRemovable() async {
-    const script = r'''
-Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_.DeviceID)|$($_.VolumeName)" }
-''';
-    try {
-      final proc = await Process.run('powershell',
-          _psArgs(script, hidden: true),
-          stdoutEncoding: const SystemEncoding());
-      final lines = proc.stdout.toString().split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty);
-      for (final line in lines) {
-        final parts = line.split('|');
-        final letter = parts.isNotEmpty ? parts[0].trim() : '';
-        if (letter.isEmpty) continue;
-        final label = parts.length > 1 ? parts[1].trim() : '';
-        await _ejectWindowsDrive(letter); // eject ออกจริง (Safely Remove)
-        await _reportUsbBlock(label.isNotEmpty ? label : letter);
-      }
     } catch (_) {}
   }
 
@@ -352,7 +326,8 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
   }
 
   // Windows: poll removable drive list ทุก 15s ผ่าน PowerShell (ไม่มี native plugin)
-  // เจอ drive letter ใหม่ระหว่าง 2 รอบ + policy บล็อกอยู่ → dismount ด้วย mountvol /P แล้วรายงาน
+  // เจอ drive letter ใหม่ระหว่าง 2 รอบ + policy บล็อกอยู่ → Disable-PnpDevice (จับ device ที่เสียบใหม่
+  // ระหว่าง blocked ที่หลุดรอด real-time SSE — เช่น เสียบตอน stream หลุด). idempotent
   void _startWindowsUsbPolling() {
     const script = r'''
 Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_.DeviceID)|$($_.VolumeName)" }
@@ -379,13 +354,11 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
         }
 
         final newLetters = current.keys.where((k) => !_knownUsbDrives.contains(k));
-        for (final letter in newLetters) {
-          if (!_allowUsb) {
-            final label = current[letter] ?? '';
-            final deviceName = label.isNotEmpty ? label : letter;
-            await _ejectWindowsDrive(letter); // eject ออกจริง (Safely Remove) — ไม่ format/ลบข้อมูล
-            await _reportUsbBlock(deviceName);
-          }
+        // มี USB drive ใหม่โผล่ระหว่าง blocked → Disable-PnpDevice ครอบทุก USB storage ที่เสียบ
+        // (Disable-PnpDevice ทำงานที่ device level ไม่ใช่ drive letter จึงเรียกครั้งเดียวพอ;
+        //  helper คืน+report FriendlyName ของ device ที่ disable เอง)
+        if (!_allowUsb && newLetters.isNotEmpty) {
+          await _disableWindowsUsbDrives();
         }
         _knownUsbDrives = current.keys.toSet();
       } catch (_) {}
