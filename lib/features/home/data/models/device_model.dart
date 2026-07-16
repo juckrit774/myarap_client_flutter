@@ -88,6 +88,9 @@ class DeviceDetail {
   // Applications
   final List<ApplicationInfo> applications;
 
+  // Active app (macOS: NSWorkspace frontmostApplication)
+  final String frontmostApp;
+
   const DeviceDetail({
     required this.computerName,
     required this.localizedName,
@@ -123,6 +126,7 @@ class DeviceDetail {
     required this.ipAddress,
     required this.displaysDetail,
     required this.applications,
+    this.frontmostApp = '',
   });
 
   // Backward-compat helpers used by existing code
@@ -242,6 +246,7 @@ class DeviceDetail {
       ipAddress: s('ipAddress'),
       displaysDetail: displays,
       applications: apps,
+      frontmostApp: s('frontmostApp'),
     );
   }
 

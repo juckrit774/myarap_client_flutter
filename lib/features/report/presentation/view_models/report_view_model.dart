@@ -1,11 +1,10 @@
+import 'dart:convert';
 import 'dart:io';
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../models/image_model.dart';
 import '../../../problem/models/m_problem_model.dart';
 import '../../../../core/services/network_manager.dart';
-import '../../../../core/models/base_request_model.dart';
 
 class ReportViewModel extends ChangeNotifier {
   bool isLoading = false;
@@ -19,31 +18,20 @@ class ReportViewModel extends ChangeNotifier {
   List<MProblemModel> get selectedProblems =>
       problemTypes.where((p) => p.isSelected).toList();
 
-  Future<void> loadProblemTypes({String? token}) async {
+  /// โหลด problem types จาก GET /v3/api/problems
+  Future<void> loadProblemTypes() async {
+    if (isLoading) return;
     isLoading = true;
     notifyListeners();
 
     try {
-      final response = await NetworkManager.instance.request<List<MProblemModel>>(
-        request: BaseRequestModel(
-          module: 'ProblemTracking',
-          target: 'MProblem',
-          token: token,
-          data: {},
-        ),
-        parseEntries: (json) {
-          if (json is List) {
-            return json.map((e) => MProblemModel.fromJson(e as Map<String, dynamic>)).toList();
-          }
-          return [];
-        },
-        url: '/v2/api/Select',
-      );
-      if (response.isSuccess && response.entries != null) {
-        problemTypes = response.entries!;
-      } else {
-        problemTypes = MProblemModel.mockList();
-      }
+      final data = await NetworkManager.instance.getV3('/v3/api/problems');
+      final list = data['data'] as List<dynamic>? ?? [];
+      final seen = <String>{};
+      problemTypes = list
+          .map((e) => MProblemModel.fromJson(e as Map<String, dynamic>))
+          .where((p) => seen.add(p.id))
+          .toList();
     } catch (_) {
       problemTypes = MProblemModel.mockList();
     }
@@ -96,9 +84,8 @@ class ReportViewModel extends ChangeNotifier {
     return null;
   }
 
+  /// ส่ง ticket ผ่าน POST /v3/api/tickets
   Future<bool> sendReport({
-    required String token,
-    required String assetNo,
     void Function(String message)? onError,
   }) async {
     final error = validate();
@@ -112,68 +99,51 @@ class ReportViewModel extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Step 1: Create problem record
-      final createResponse = await NetworkManager.instance.request<Map<String, dynamic>>(
-        request: BaseRequestModel(
-          module: 'ProblemTracking',
-          target: 'CreateProblem',
-          token: token,
-          data: {
-            'assetNo': assetNo,
-            'problems': selectedProblems.map((p) => p.id).toList(),
-            'remark': remark,
-          },
-        ),
-        parseEntries: (json) => json is Map<String, dynamic> ? json : null,
-        url: '/v2/api/Insert',
-      );
-
-      if (createResponse.status == 401) {
-        isSending = false;
-        notifyListeners();
-        NetworkManager.onUnauthorized?.call();
-        return false;
+      final body = <String, dynamic>{
+        'problems': selectedProblems.map((p) => p.id).toList(),
+        'description': remark,
+      };
+      // ถ้า remark ไม่ว่างใช้เป็น title ด้วย (V3 auto-fill title จาก problems[] ถ้าไม่มี)
+      if (remark.trim().isNotEmpty) {
+        body['title'] = remark.trim();
       }
 
-      if (!createResponse.isSuccess) {
-        onError?.call(createResponse.message.isNotEmpty ? createResponse.message : 'ส่งรายงานไม่สำเร็จ');
-        isSending = false;
+      // แนบรูปภาพเป็น base64 data URLs (max 3 รูป, ตัดที่ 2MB ต่อรูป)
+      if (images.isNotEmpty) {
+        sendProgress = 0.2;
         notifyListeners();
-        return false;
-      }
-
-      // Step 2: Upload images if any (optional)
-      if (images.isNotEmpty && createResponse.entries != null) {
-        final problemId = createResponse.entries!['id']?.toString();
-        if (problemId != null) {
-          final multipartFiles = await Future.wait(
-            images.map((img) => MultipartFile.fromFile(img.path, filename: img.fileName)),
-          );
-          await NetworkManager.instance.uploadMultipart<dynamic>(
-            fields: {
-              'module': 'ProblemTracking',
-              'target': 'UploadProblemImage',
-              'token': token,
-              'problem_id': problemId,
-            },
-            files: multipartFiles,
-            parseEntries: (json) => json,
-            onProgress: (sent, total) {
-              sendProgress = total > 0 ? sent / total : 0;
-              notifyListeners();
-            },
-          );
+        final attachments = <String>[];
+        for (final img in images.take(3)) {
+          try {
+            final file = File(img.path);
+            if (!file.existsSync()) continue;
+            final bytes = await file.readAsBytes();
+            if (bytes.length > 2 * 1024 * 1024) continue; // ข้ามรูปที่ใหญ่กว่า 2MB
+            final ext = img.path.split('.').last.toLowerCase();
+            final mime = ext == 'png' ? 'image/png' : 'image/jpeg';
+            attachments.add('data:$mime;base64,${base64Encode(bytes)}');
+          } catch (_) {}
+        }
+        if (attachments.isNotEmpty) {
+          body['attachments'] = attachments;
         }
       }
 
+      await NetworkManager.instance.postV3('/v3/api/tickets', body);
+
+      sendProgress = 1.0;
       _reset();
       isSending = false;
       notifyListeners();
       return true;
     } catch (e) {
+      if (e.toString().contains('unauthorized')) {
+        NetworkManager.onUnauthorized?.call();
+      } else {
+        onError?.call('ส่งรายงานไม่สำเร็จ กรุณาลองใหม่');
+      }
       isSending = false;
       notifyListeners();
-      onError?.call('ส่งรายงานไม่สำเร็จ กรุณาลองใหม่');
       return false;
     }
   }

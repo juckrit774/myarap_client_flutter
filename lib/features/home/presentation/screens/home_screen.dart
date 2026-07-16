@@ -89,7 +89,7 @@ class _HomeView extends StatelessWidget {
         IconButton(
           icon: const Icon(Icons.qr_code, color: Colors.white),
           tooltip: 'QR Code',
-          onPressed: () => _showQRCode(context, vm.token ?? ''),
+          onPressed: () => _showQRCode(context, vm.accessToken ?? ''),
         ),
         IconButton(
           icon: const Icon(Icons.notifications_outlined, color: Colors.white),
@@ -97,7 +97,7 @@ class _HomeView extends StatelessWidget {
           onPressed: () => Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => NotificationScreen(token: vm.token),
+              builder: (_) => NotificationScreen(token: vm.accessToken),
             ),
           ),
         ),
@@ -153,14 +153,20 @@ class _UserSection extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 2),
-              Text(
-                vm.assetUpdatedAt != null
-                    ? 'Asset updated: ${vm.assetUpdatedAt}'
-                    : vm.lastUpdated != null
-                        ? 'อัปเดตล่าสุด: ${DateFormat('dd MMM yyyy HH:mm').format(vm.lastUpdated!)}'
-                        : 'กำลังโหลด...',
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
+              if (vm.updateErrorMessage != null)
+                Text(
+                  vm.updateErrorMessage!,
+                  style: const TextStyle(fontSize: 11, color: Colors.red),
+                )
+              else
+                Text(
+                  vm.assetUpdatedAt != null
+                      ? 'Asset updated: ${vm.assetUpdatedAt}'
+                      : vm.lastUpdated != null
+                          ? 'อัปเดตล่าสุด: ${DateFormat('dd MMM yyyy HH:mm').format(vm.lastUpdated!)}'
+                          : 'กำลังโหลด...',
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
             ],
           ),
           const Spacer(),
@@ -456,10 +462,7 @@ class _ActionButtons extends StatelessWidget {
               onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => ProblemScreen(
-                    token: vm.token,
-                    assetNo: vm.assetNo,
-                  ),
+                  builder: (_) => const ProblemScreen(),
                 ),
               ),
             ),
@@ -478,10 +481,7 @@ class _ActionButtons extends StatelessWidget {
               onPressed: () => Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => ReportScreen(
-                    token: vm.token ?? '',
-                    assetNo: vm.assetNo,
-                  ),
+                  builder: (_) => const ReportScreen(),
                 ),
               ),
             ),

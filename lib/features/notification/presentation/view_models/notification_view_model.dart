@@ -11,14 +11,8 @@ class NotificationViewModel extends ChangeNotifier {
     isLoading = true;
     notifyListeners();
 
-    try {
-      // API call would go here
-      // On failure, use mock data
-      await Future.delayed(const Duration(milliseconds: 400));
-      notifications = NotificationModel.mockList();
-    } catch (_) {
-      notifications = NotificationModel.mockList();
-    }
+    // TODO: replace with real API call
+    notifications = [];
 
     isLoading = false;
     notifyListeners();

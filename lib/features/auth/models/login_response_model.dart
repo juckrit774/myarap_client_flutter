@@ -1,3 +1,37 @@
+/// V3 device auth response — จาก POST /v3/api/auth
+class DeviceAuthResponse {
+  final String accessToken;
+  final String refreshToken;
+  final String fingerprint;
+  final String assetTag;
+  final String assetId;
+
+  const DeviceAuthResponse({
+    required this.accessToken,
+    required this.refreshToken,
+    required this.fingerprint,
+    required this.assetTag,
+    required this.assetId,
+  });
+
+  factory DeviceAuthResponse.fromJson(Map<String, dynamic> json) =>
+      DeviceAuthResponse(
+        accessToken: json['accessToken'] as String? ?? '',
+        refreshToken: json['refreshToken'] as String? ?? '',
+        fingerprint: json['fingerprint'] as String? ?? '',
+        assetTag: json['assetTag'] as String? ?? '',
+        assetId: json['assetId'] as String? ?? '',
+      );
+
+  Map<String, dynamic> toJson() => {
+        'accessToken': accessToken,
+        'refreshToken': refreshToken,
+        'fingerprint': fingerprint,
+        'assetTag': assetTag,
+        'assetId': assetId,
+      };
+}
+
 class WebService {
   final String key;
   final String url;

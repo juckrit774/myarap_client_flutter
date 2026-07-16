@@ -227,21 +227,46 @@ class MacDeviceInfo {
 
   private static func getAllApplications() -> [[String: Any]] {
     let fm = FileManager.default
-    guard let appsUrl = try? fm.url(for: .applicationDirectory, in: .localDomainMask,
-                                     appropriateFor: nil, create: false) else { return [] }
-    let urls = (try? fm.contentsOfDirectory(at: appsUrl, includingPropertiesForKeys: [],
-                                             options: [.skipsPackageDescendants, .skipsSubdirectoryDescendants])) ?? []
-    return urls.compactMap { url -> [String: Any]? in
-      guard fm.isExecutableFile(atPath: url.path), let mdi = NSMetadataItem(url: url) else { return nil }
-      return [
-        "name": mdi.value(forAttribute: kMDItemDisplayName as String) as? String ?? "",
-        "version": mdi.value(forAttribute: kMDItemVersion as String) as? String ?? "",
-        "size": mdi.value(forAttribute: kMDItemFSSize as String) as? Int ?? 0
-      ]
+    // รวมทุก location: /Applications, /System/Applications, ~/Applications
+    var searchDirs: [URL] = []
+    for mask: FileManager.SearchPathDomainMask in [.localDomainMask, .systemDomainMask, .userDomainMask] {
+      if let u = try? fm.url(for: .applicationDirectory, in: mask, appropriateFor: nil, create: false) {
+        searchDirs.append(u)
+        // /System/Applications/Utilities และ Subfolder อื่น
+        if let subs = try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: [.isDirectoryKey],
+                                                   options: [.skipsPackageDescendants, .skipsSubdirectoryDescendants]) {
+          for sub in subs where sub.pathExtension != "app" {
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: sub.path, isDirectory: &isDir), isDir.boolValue {
+              searchDirs.append(sub)
+            }
+          }
+        }
+      }
     }
+    var seen = Set<String>()
+    var result: [[String: Any]] = []
+    for dir in searchDirs {
+      let entries = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [],
+                                                  options: [.skipsPackageDescendants, .skipsSubdirectoryDescendants])) ?? []
+      for url in entries where url.pathExtension == "app" {
+        guard fm.isExecutableFile(atPath: url.path), let mdi = NSMetadataItem(url: url) else { continue }
+        let name = mdi.value(forAttribute: kMDItemDisplayName as String) as? String ?? url.deletingPathExtension().lastPathComponent
+        guard !name.isEmpty, !seen.contains(name) else { continue }
+        seen.insert(name)
+        result.append([
+          "name": name,
+          "version": mdi.value(forAttribute: kMDItemVersion as String) as? String ?? "",
+          "size": mdi.value(forAttribute: kMDItemFSSize as String) as? Int ?? 0
+        ])
+      }
+    }
+    return result
   }
 
   static func collect(result: @escaping FlutterResult) {
+    // ต้อง capture บน main thread (NSWorkspace ต้องการ main thread)
+    let frontmostApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
     DispatchQueue.global(qos: .userInitiated).async {
       let osVer = ProcessInfo.processInfo.operatingSystemVersion
 
@@ -293,7 +318,8 @@ class MacDeviceInfo {
         "displays": getDisplays(),
         "gpu":      getGPU(),
         "ipAddress": getIPAddress(),
-        "applications": getAllApplications()
+        "applications": getAllApplications(),
+        "frontmostApp": frontmostApp
       ]
 
       DispatchQueue.main.async { result(info) }
