@@ -1,5 +1,5 @@
+import 'dart:convert';
 import 'dart:io';
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../models/image_model.dart';
@@ -108,16 +108,28 @@ class ReportViewModel extends ChangeNotifier {
         body['title'] = remark.trim();
       }
 
-      final resp = await NetworkManager.instance.postV3('/v3/api/tickets', body);
-      final ticketId = resp['id']?.toString();
-
-      // อัปโหลดรูปภาพ (ยังใช้ V2 Upload endpoint หรือข้ามไปก่อน)
-      // TODO: V3 ยังไม่มี image upload endpoint — ข้ามไปก่อน
-      if (images.isNotEmpty && ticketId != null) {
-        sendProgress = 0.5;
+      // แนบรูปภาพเป็น base64 data URLs (max 3 รูป, ตัดที่ 2MB ต่อรูป)
+      if (images.isNotEmpty) {
+        sendProgress = 0.2;
         notifyListeners();
-        // placeholder: image upload จะเพิ่มใน V3 ภายหลัง
+        final attachments = <String>[];
+        for (final img in images.take(3)) {
+          try {
+            final file = File(img.path);
+            if (!file.existsSync()) continue;
+            final bytes = await file.readAsBytes();
+            if (bytes.length > 2 * 1024 * 1024) continue; // ข้ามรูปที่ใหญ่กว่า 2MB
+            final ext = img.path.split('.').last.toLowerCase();
+            final mime = ext == 'png' ? 'image/png' : 'image/jpeg';
+            attachments.add('data:$mime;base64,${base64Encode(bytes)}');
+          } catch (_) {}
+        }
+        if (attachments.isNotEmpty) {
+          body['attachments'] = attachments;
+        }
       }
+
+      await NetworkManager.instance.postV3('/v3/api/tickets', body);
 
       sendProgress = 1.0;
       _reset();

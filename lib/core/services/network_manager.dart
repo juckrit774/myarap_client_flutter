@@ -162,6 +162,38 @@ class NetworkManager {
     }
   }
 
+  /// เปิด SSE stream ด้วย Bearer JWT (long-lived connection — 401 จะลอง refresh หนึ่งครั้ง)
+  /// receiveTimeout ต้องเป็น Duration.zero (= ไม่จำกัด) เพราะ default 15s จะตัด connection
+  /// ที่เงียบระหว่างรอ event — server ส่ง keepalive comment ทุก 30s ซึ่งนานกว่า default
+  Future<ResponseBody> openV3Stream(String path) async {
+    Future<ResponseBody> connect(String token) async {
+      final resp = await _dioV3.get<ResponseBody>(
+        path,
+        options: Options(
+          headers: {'Authorization': 'Bearer $token', 'Accept': 'text/event-stream'},
+          responseType: ResponseType.stream,
+          receiveTimeout: Duration.zero,
+        ),
+      );
+      return resp.data!;
+    }
+
+    final token = _accessToken ?? await CacheManager.getAccessToken();
+    try {
+      return await connect(token ?? '');
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 401) {
+        final refreshed = await _tryRefresh();
+        if (refreshed) {
+          final newToken = _accessToken ?? await CacheManager.getAccessToken();
+          return connect(newToken ?? '');
+        }
+        onUnauthorized?.call();
+      }
+      rethrow;
+    }
+  }
+
   /// refresh device token — เรียก POST /v3/api/auth/refresh แล้วอัปเดต cache
   Future<bool> _tryRefresh() async {
     if (_refreshing) return false;

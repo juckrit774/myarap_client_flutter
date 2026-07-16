@@ -76,10 +76,23 @@ class _ProblemCard extends StatelessWidget {
   final VoidCallback onTap;
 
   Color _statusColor(String status) => switch (status) {
-        'Open' || 'Opened' => Colors.red,
-        'In Progress' || 'Processing' => AppColors.orange,
-        'Resolved' || 'Closed' => Colors.green,
+        'new' || 'Open' || 'Opened' => Colors.red,
+        'assigned' => AppColors.orange,
+        'in_progress' || 'In Progress' || 'Processing' => AppColors.opaPurple,
+        'resolved' || 'Resolved' => Colors.teal,
+        'closed' || 'Closed' => Colors.green,
+        'cancelled' => Colors.grey,
         _ => Colors.grey,
+      };
+
+  String _statusLabel(String status) => switch (status) {
+        'new' => 'รอดำเนินการ',
+        'assigned' => 'มอบหมายแล้ว',
+        'in_progress' => 'กำลังดำเนินการ',
+        'resolved' => 'แก้ไขแล้ว',
+        'closed' => 'ปิดแล้ว',
+        'cancelled' => 'ยกเลิก',
+        _ => status,
       };
 
   @override
@@ -117,7 +130,7 @@ class _ProblemCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(
-                      problem.currentStatus,
+                      _statusLabel(problem.currentStatus),
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
@@ -128,10 +141,21 @@ class _ProblemCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 6),
-              Text(
-                'Asset: ${problem.assetNo}',
-                style: TextStyle(fontSize: 13, color: Colors.grey[600]),
-              ),
+              if (problem.problemList.isNotEmpty)
+                Text(
+                  problem.problemList.first,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                ),
+              if (problem.assetNo.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    'Asset: ${problem.assetNo}',
+                    style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                  ),
+                ),
               const SizedBox(height: 4),
               Text(
                 problem.formattedDate,

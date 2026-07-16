@@ -153,14 +153,20 @@ class _UserSection extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 2),
-              Text(
-                vm.assetUpdatedAt != null
-                    ? 'Asset updated: ${vm.assetUpdatedAt}'
-                    : vm.lastUpdated != null
-                        ? 'อัปเดตล่าสุด: ${DateFormat('dd MMM yyyy HH:mm').format(vm.lastUpdated!)}'
-                        : 'กำลังโหลด...',
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
+              if (vm.updateErrorMessage != null)
+                Text(
+                  vm.updateErrorMessage!,
+                  style: const TextStyle(fontSize: 11, color: Colors.red),
+                )
+              else
+                Text(
+                  vm.assetUpdatedAt != null
+                      ? 'Asset updated: ${vm.assetUpdatedAt}'
+                      : vm.lastUpdated != null
+                          ? 'อัปเดตล่าสุด: ${DateFormat('dd MMM yyyy HH:mm').format(vm.lastUpdated!)}'
+                          : 'กำลังโหลด...',
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
             ],
           ),
           const Spacer(),

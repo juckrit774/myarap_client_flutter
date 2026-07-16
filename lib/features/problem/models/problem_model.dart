@@ -1,5 +1,51 @@
 import 'package:intl/intl.dart';
 
+class CommentEntry {
+  final String by;
+  final DateTime at;
+  final String body;
+
+  const CommentEntry({required this.by, required this.at, required this.body});
+
+  factory CommentEntry.fromJson(Map<String, dynamic> json) {
+    return CommentEntry(
+      by: json['by']?.toString() ?? '',
+      at: json['at'] != null
+          ? DateTime.tryParse(json['at'].toString()) ?? DateTime.now()
+          : DateTime.now(),
+      body: json['body']?.toString() ?? '',
+    );
+  }
+}
+
+class StatusLogEntry {
+  final String from;
+  final String to;
+  final String by;
+  final DateTime at;
+  final String remark;
+
+  const StatusLogEntry({
+    required this.from,
+    required this.to,
+    required this.by,
+    required this.at,
+    required this.remark,
+  });
+
+  factory StatusLogEntry.fromJson(Map<String, dynamic> json) {
+    return StatusLogEntry(
+      from: json['from']?.toString() ?? '',
+      to: json['to']?.toString() ?? '',
+      by: json['by']?.toString() ?? '',
+      at: json['at'] != null
+          ? DateTime.tryParse(json['at'].toString()) ?? DateTime.now()
+          : DateTime.now(),
+      remark: json['remark']?.toString() ?? '',
+    );
+  }
+}
+
 class ProblemModel {
   final String id;
   final String problemNo;
@@ -12,6 +58,11 @@ class ProblemModel {
   final String currentStatus;
   final String? openChatLink;
   final String? computerName;
+  // V3 extended fields (available from detail endpoint)
+  final String priority;
+  final String assigneeId;
+  final List<StatusLogEntry> statusLogs;
+  final List<CommentEntry> comments;
 
   const ProblemModel({
     required this.id,
@@ -25,9 +76,14 @@ class ProblemModel {
     required this.currentStatus,
     this.openChatLink,
     this.computerName,
+    this.priority = 'medium',
+    this.assigneeId = '',
+    this.statusLogs = const [],
+    this.comments = const [],
   });
 
   /// รองรับทั้ง V2 format และ V3 ticket format `{id, number, title, status, priority, createdAt}`
+  /// รวมถึง V3 detail format (statusLogs, assigneeId, description)
   factory ProblemModel.fromJson(Map<String, dynamic> json) {
     // V3 ticket fields
     final v3Id = json['id']?.toString();
@@ -35,6 +91,20 @@ class ProblemModel {
     final v3Title = json['title'] as String?;
     final v3Status = json['status'] as String?;
     final v3CreatedAt = json['createdAt'] as String?;
+
+    // statusLogs (detail endpoint only)
+    final rawLogs = json['statusLogs'] as List<dynamic>?;
+    final statusLogs = rawLogs
+            ?.map((e) => StatusLogEntry.fromJson(e as Map<String, dynamic>))
+            .toList() ??
+        const <StatusLogEntry>[];
+
+    // comments (detail endpoint only)
+    final rawComments = json['comments'] as List<dynamic>?;
+    final comments = rawComments
+            ?.map((e) => CommentEntry.fromJson(e as Map<String, dynamic>))
+            .toList() ??
+        const <CommentEntry>[];
 
     return ProblemModel(
       id: v3Id ?? json['uniqueId']?.toString() ?? '',
@@ -58,6 +128,10 @@ class ProblemModel {
       currentStatus: v3Status ?? json['currentStatus'] as String? ?? 'Open',
       openChatLink: json['openChatLink'] as String?,
       computerName: json['computerName'] as String?,
+      priority: json['priority'] as String? ?? 'medium',
+      assigneeId: json['assigneeId'] as String? ?? '',
+      statusLogs: statusLogs,
+      comments: comments,
     );
   }
 
