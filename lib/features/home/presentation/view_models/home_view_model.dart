@@ -50,6 +50,7 @@ class HomeViewModel extends ChangeNotifier {
   bool _remoteCapturing = false;
   String _remoteSessionId = ''; // session ที่กำลัง active (ใช้ตอนผู้ใช้กด Disconnect เอง)
   Process? _winIndicatorProc;   // Windows: process ของ topmost banner form (kill ตอน stop)
+  bool _winIndicatorStopByUs = false; // true = เรา kill เอง (normal stop); false = user กดปุ่มหยุด
   // interval ระหว่างเฟรม (~2.5 fps) — สมดุลระหว่าง smoothness กับ bandwidth/CPU
   static const _remoteFrameInterval = Duration(milliseconds: 400);
 
@@ -521,6 +522,7 @@ if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY'
       // ⚠️ ไม่มีปุ่มหยุดโต้ตอบกลับ Dart (PowerShell form call กลับ Dart ไม่ได้) — Disconnect
       //    ฝั่ง Windows agent = future; ปัจจุบันตัดได้จากฝั่ง admin เท่านั้น
       final safeViewer = viewer.replaceAll('"', '');
+      // form มีปุ่ม "หยุด" — คลิกแล้ว form ปิด → process exit (Dart ฟัง exitCode → disconnect)
       final script = '''
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -531,23 +533,53 @@ Add-Type -AssemblyName System.Drawing
 \$f.ShowInTaskbar = \$false
 \$f.StartPosition = 'Manual'
 \$sw = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
-\$f.Size = New-Object System.Drawing.Size(420, 36)
-\$f.Location = New-Object System.Drawing.Point([int](\$sw/2 - 210), 6)
+\$f.Size = New-Object System.Drawing.Size(440, 40)
+\$f.Location = New-Object System.Drawing.Point([int](\$sw/2 - 220), 6)
 \$f.BackColor = [System.Drawing.Color]::FromArgb(217, 31, 64)
 \$lbl = New-Object System.Windows.Forms.Label
 \$lbl.Text = "  * หน้าจอกำลังถูกดูโดย $safeViewer"
 \$lbl.ForeColor = 'White'
 \$lbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-\$lbl.Dock = 'Fill'
+\$lbl.Location = New-Object System.Drawing.Point(0, 0)
+\$lbl.Size = New-Object System.Drawing.Size(330, 40)
 \$lbl.TextAlign = 'MiddleLeft'
 \$f.Controls.Add(\$lbl)
+\$btn = New-Object System.Windows.Forms.Button
+\$btn.Text = "หยุด"
+\$btn.Size = New-Object System.Drawing.Size(90, 28)
+\$btn.Location = New-Object System.Drawing.Point(340, 6)
+\$btn.FlatStyle = 'Flat'
+\$btn.BackColor = [System.Drawing.Color]::White
+\$btn.ForeColor = [System.Drawing.Color]::FromArgb(217, 31, 64)
+\$btn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+\$btn.Add_Click({ \$f.Close() })
+\$f.Controls.Add(\$btn)
 [System.Windows.Forms.Application]::Run(\$f)
 ''';
       try {
-        // ไม่ await — form.Run บล็อกจนกว่า process ถูก kill
-        _winIndicatorProc = await Process.start('powershell', _psArgs(script, hidden: true));
+        _winIndicatorStopByUs = false;
+        // ไม่ await — form.Run บล็อกจนกว่า process ถูก kill หรือ user กดปุ่มหยุด
+        final proc = await Process.start('powershell', _psArgs(script, hidden: true));
+        _winIndicatorProc = proc;
+        // ฟัง exit: ถ้า process จบเองโดยเราไม่ได้ kill = user กดปุ่มหยุด → disconnect
+        proc.exitCode.then((_) => _onWindowsIndicatorClosed());
       } catch (_) {}
       return;
+    }
+  }
+
+  // Windows: indicator form ปิด (user กดปุ่มหยุด) → หยุด capture + แจ้ง backend จบ session
+  void _onWindowsIndicatorClosed() {
+    if (_winIndicatorStopByUs) return; // เรา kill เอง (normal stop) — ไม่ใช่ user กด
+    _winIndicatorProc = null;
+    final sid = _remoteSessionId;
+    _remoteCaptureTimer?.cancel();
+    _remoteCaptureTimer = null;
+    _remoteSessionId = '';
+    if (sid.isNotEmpty) {
+      NetworkManager.instance
+          .postV3('/v3/api/device/remote/stop', {'sessionId': sid})
+          .catchError((_) => <String, dynamic>{});
     }
   }
 
@@ -555,6 +587,7 @@ Add-Type -AssemblyName System.Drawing
     if (Platform.isMacOS) {
       _remoteChannel.invokeMethod('hideIndicator').catchError((_) => null);
     } else if (Platform.isWindows) {
+      _winIndicatorStopByUs = true; // บอก exitCode handler ว่านี่คือ normal stop ไม่ใช่ user กดปุ่ม
       _winIndicatorProc?.kill();
       _winIndicatorProc = null;
     }
