@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import '../../../../core/config/app_config.dart';
 import '../../data/models/device_model.dart';
 import '../../../auth/models/login_response_model.dart';
 import '../../../../core/services/network_manager.dart';
@@ -231,15 +232,30 @@ class HomeViewModel extends ChangeNotifier {
 
   // Windows: poll foreground app ทุก 60s ผ่าน PowerShell Win32 API
   void _startWindowsAppPolling() {
+    // ⚠️ script เดิมพัง 2 จุด (ไม่เคยรันสำเร็จ — Windows ไม่มี lastApp เลย):
+    //   1. `$pid` เป็น automatic read-only variable ของ PowerShell → assign แล้ว error
+    //   2. ต่อ string ข้ามบรรทัดด้วย `+` ที่ "ต้นบรรทัดถัดไป" ไม่ทำงานใน PowerShell
+    //      (statement จบตั้งแต่บรรทัดแรก) → signature ได้ครึ่งเดียว Add-Type พัง
+    // แก้: here-string + $procId; ส่งชื่อโปรแกรม (Description/ProcessName) แทน window title
+    // ให้ semantic ตรงกับ macOS ที่ส่ง localizedName ของแอป
     _windowsAppTimer = Timer.periodic(const Duration(seconds: 60), (_) async {
       const script = r'''
-$sig = '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();'
-      + '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);'
-Add-Type -MemberDefinition $sig -Name Win32 -Namespace WinHelper -ErrorAction SilentlyContinue
-$hwnd = [WinHelper.Win32]::GetForegroundWindow()
-$pid = [uint32]0
-[WinHelper.Win32]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
-(Get-Process -Id $pid -ErrorAction SilentlyContinue).MainWindowTitle
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class W32Fg {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint procId);
+}
+"@
+$h = [W32Fg]::GetForegroundWindow()
+$procId = [uint32]0
+[W32Fg]::GetWindowThreadProcessId($h, [ref]$procId) | Out-Null
+$p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+if ($p) {
+  if ($p.Description) { $p.Description } else { $p.ProcessName }
+}
 ''';
       try {
         final proc = await Process.run(
@@ -865,7 +881,7 @@ $bmp.Save($ms, $enc, $ep)
         'builtin':     disp.builtin,
       }).toList(),
       // agent
-      'agentVersion': '3.0.0',
+      'agentVersion': AppConfig.agentVersion, // single source — bump ที่ app_config.dart ที่เดียว
       // active app (macOS EventChannel; ว่างบน Windows)
       if (d.frontmostApp.isNotEmpty) 'lastApp': d.frontmostApp,
     };
