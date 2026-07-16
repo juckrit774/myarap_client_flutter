@@ -64,7 +64,16 @@
       "Bash(curl -s \"https://api.github.com/repos/juckrit774/myarap_client_flutter/actions/runs/26430214253/jobs\")",
       "Bash(gh run *)",
       "Bash(pandoc --version)",
-      "Bash(pip3 install *)"
+      "Bash(pip3 install *)",
+      "Bash(gh auth *)",
+      "Bash(gh workflow *)",
+      "Bash(hdiutil version *)",
+      "Bash(hdiutil help *)",
+      "Bash(hdiutil create *)",
+      "Bash(rm -rf /tmp/dmg_staging)",
+      "Bash(mkdir /tmp/dmg_staging)",
+      "Bash(cp -R \"/Users/juckrit-ar-mobile/Documents/Project/Project-Flutter/myarap_flutter_full/build/macos/Build/Products/Release/myarap.app\" /tmp/dmg_staging/)",
+      "Bash(ln -s /Applications /tmp/dmg_staging/Applications)"
     ]
   }
 }
