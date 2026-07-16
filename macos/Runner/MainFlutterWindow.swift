@@ -186,8 +186,9 @@ class RemoteDisconnectTarget: NSObject {
 
 // RemoteConsent: แสดง NSAlert ขอความยินยอมก่อนให้ดูหน้าจอ (view-only) + indicator ระหว่างถูกดู
 enum RemoteConsent {
-  // floating banner window แสดง "🔴 หน้าจอกำลังถูกดู" + ปุ่มหยุด ตลอดที่มี session
-  static var indicatorWindow: NSWindow?
+  // banner windows — หนึ่งอันต่อหนึ่งจอ (ผู้ใช้หลายจอ: จอที่ถูก capture อาจไม่ใช่จอที่กำลังมอง
+  // — เจอจริง: banner บน NSScreen.main จอเดียว โผล่ในภาพ Remote แต่ user มองอีกจอไม่เห็น)
+  static var indicatorWindows: [NSWindow] = []
   static let disconnectTarget = RemoteDisconnectTarget() // retain เพื่อให้ปุ่มเรียกได้
 
   // ถาม consent — คืน true = อนุญาต, false = ปฏิเสธ (modal, ต้องรันบน main thread)
@@ -205,51 +206,56 @@ enum RemoteConsent {
     }
   }
 
-  // แสดง banner แดงลอยด้านบนจอ (always-on-top) + ปุ่ม "หยุด" ให้ผู้ใช้ตัดการถูกดูเองได้
+  // แสดง banner แดงลอยด้านบน "ทุกจอ" (always-on-top) + ปุ่ม "หยุด" ให้ผู้ใช้ตัดการถูกดูเองได้
   static func showIndicator(viewer: String) {
     DispatchQueue.main.async {
       hideIndicatorNow()
-      guard let screen = NSScreen.main else { return }
-      let w: CGFloat = 440, h: CGFloat = 40
-      let x = screen.frame.midX - w / 2
-      let y = screen.frame.maxY - h - 8 // ชิดบนใต้ menu bar
-      let win = NSWindow(contentRect: NSRect(x: x, y: y, width: w, height: h),
-                         styleMask: .borderless, backing: .buffered, defer: false)
-      win.level = .statusBar // อยู่เหนือทุกหน้าต่าง (แม้ fullscreen อื่น)
-      win.isOpaque = false
-      win.backgroundColor = .clear
-      win.ignoresMouseEvents = false // ต้องรับคลิกเพื่อกดปุ่มหยุด
-      win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-
-      let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
-      container.wantsLayer = true
-      container.layer?.backgroundColor = NSColor(calibratedRed: 0.85, green: 0.12, blue: 0.25, alpha: 0.95).cgColor
-      container.layer?.cornerRadius = 8
-
-      let label = NSTextField(labelWithString: "🔴  หน้าจอกำลังถูกดูโดย \(viewer)")
-      label.frame = NSRect(x: 14, y: 0, width: w - 110, height: h)
-      label.alignment = .left
-      label.textColor = .white
-      label.font = .systemFont(ofSize: 13, weight: .semibold)
-      label.backgroundColor = .clear
-      label.isBezeled = false
-      label.isEditable = false
-      label.lineBreakMode = .byTruncatingTail
-      container.addSubview(label)
-
-      let btn = NSButton(frame: NSRect(x: w - 92, y: 7, width: 80, height: 26))
-      btn.title = "หยุด"
-      btn.bezelStyle = .rounded
-      btn.font = .systemFont(ofSize: 12, weight: .semibold)
-      btn.target = disconnectTarget
-      btn.action = #selector(RemoteDisconnectTarget.tapped)
-      btn.keyEquivalent = ""
-      container.addSubview(btn)
-
-      win.contentView = container
-      win.orderFrontRegardless()
-      indicatorWindow = win
+      for screen in NSScreen.screens {
+        indicatorWindows.append(makeBanner(on: screen, viewer: viewer))
+      }
     }
+  }
+
+  private static func makeBanner(on screen: NSScreen, viewer: String) -> NSWindow {
+    let w: CGFloat = 440, h: CGFloat = 40
+    let x = screen.frame.midX - w / 2
+    let y = screen.frame.maxY - h - 8 // ชิดบนใต้ menu bar ของจอนั้น
+    let win = NSWindow(contentRect: NSRect(x: x, y: y, width: w, height: h),
+                       styleMask: .borderless, backing: .buffered, defer: false)
+    win.level = .statusBar // อยู่เหนือทุกหน้าต่าง (แม้ fullscreen อื่น)
+    win.isOpaque = false
+    win.backgroundColor = .clear
+    win.ignoresMouseEvents = false // ต้องรับคลิกเพื่อกดปุ่มหยุด
+    win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+
+    let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+    container.wantsLayer = true
+    container.layer?.backgroundColor = NSColor(calibratedRed: 0.85, green: 0.12, blue: 0.25, alpha: 0.95).cgColor
+    container.layer?.cornerRadius = 8
+
+    let label = NSTextField(labelWithString: "🔴  หน้าจอกำลังถูกดูโดย \(viewer)")
+    label.frame = NSRect(x: 14, y: 0, width: w - 110, height: h)
+    label.alignment = .left
+    label.textColor = .white
+    label.font = .systemFont(ofSize: 13, weight: .semibold)
+    label.backgroundColor = .clear
+    label.isBezeled = false
+    label.isEditable = false
+    label.lineBreakMode = .byTruncatingTail
+    container.addSubview(label)
+
+    let btn = NSButton(frame: NSRect(x: w - 92, y: 7, width: 80, height: 26))
+    btn.title = "หยุด"
+    btn.bezelStyle = .rounded
+    btn.font = .systemFont(ofSize: 12, weight: .semibold)
+    btn.target = disconnectTarget
+    btn.action = #selector(RemoteDisconnectTarget.tapped)
+    btn.keyEquivalent = ""
+    container.addSubview(btn)
+
+    win.contentView = container
+    win.orderFrontRegardless()
+    return win
   }
 
   static func hideIndicator() {
@@ -257,8 +263,8 @@ enum RemoteConsent {
   }
 
   private static func hideIndicatorNow() {
-    indicatorWindow?.orderOut(nil)
-    indicatorWindow = nil
+    for win in indicatorWindows { win.orderOut(nil) }
+    indicatorWindows.removeAll()
   }
 }
 
