@@ -291,32 +291,58 @@ $pid = [uint32]0
     }
   }
 
-  // Disable USB mass-storage disk ทุกตัวที่เสียบอยู่ (present + status OK) → หายจาก Explorer.
-  // คืน FriendlyName ของแต่ละตัวที่ disable → report เป็น block event. reversible ด้วย Enable.
+  // PNPDeviceID ของ disk ที่เรา disable ไว้ — ใช้ enable กลับแม่นๆ ตอน unblock
+  // (device ที่ถูก disable หายจาก Win32_DiskDrive จึง enumerate ตอน unblock ไม่ได้ ต้องจำไว้)
+  final Set<String> _winDisabledUsbIds = {};
+  bool _winAdminWarned = false;
+
+  // Disable USB disk ทุกตัวที่เสียบอยู่ → หายจาก Explorer. reversible ด้วย Enable.
+  // ใช้ Win32_DiskDrive InterfaceType='USB' (มี PNPDeviceID ตรง) แทน filter 'USBSTOR\*'
+  // — ครอบ UASP enclosure/SSD ด้วย (พวกนี้ enumerate เป็น SCSI\DISK ไม่ใช่ USBSTOR)
   Future<void> _disableWindowsUsbDrives() async {
     const script = r'''
 $ErrorActionPreference = 'SilentlyContinue'
-Get-PnpDevice -Class DiskDrive -PresentOnly | Where-Object { $_.InstanceId -like 'USBSTOR\*' -and $_.Status -eq 'OK' } | ForEach-Object {
-  Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false
-  $_.FriendlyName
+$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $admin) { 'NOADMIN'; exit }
+Get-CimInstance Win32_DiskDrive | Where-Object { $_.InterfaceType -eq 'USB' } | ForEach-Object {
+  Disable-PnpDevice -InstanceId $_.PNPDeviceID -Confirm:$false
+  "$($_.PNPDeviceID)|$($_.Caption)"
 }
 ''';
     try {
       final proc = await Process.run('powershell', _psArgs(script, hidden: true),
           stdoutEncoding: const SystemEncoding());
-      final names = proc.stdout.toString().split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty);
-      for (final name in names) {
+      final lines = proc.stdout.toString().split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty);
+      for (final line in lines) {
+        if (line == 'NOADMIN') {
+          // agent ไม่ได้รัน Administrator → block ทำงานไม่ได้ — รายงานให้ admin เห็นใน block history
+          if (!_winAdminWarned) {
+            _winAdminWarned = true;
+            await _reportUsbBlock('[block failed] agent ไม่ได้รันแบบ Administrator');
+          }
+          return;
+        }
+        final parts = line.split('|');
+        final id = parts.isNotEmpty ? parts[0].trim() : '';
+        final name = parts.length > 1 && parts[1].trim().isNotEmpty ? parts[1].trim() : id;
+        if (id.isNotEmpty) _winDisabledUsbIds.add(id);
         await _reportUsbBlock(name);
       }
     } catch (_) {}
   }
 
-  // Enable USB mass-storage disk ที่ถูก disable ไว้ (status != OK) → mount กลับทันที
+  // Enable USB disk ที่เรา disable ไว้ (จำ id) + fallback ตัวที่ status != OK ใน USBSTOR → mount กลับทันที
   Future<void> _enableWindowsUsbDrives() async {
-    const script = r'''
-$ErrorActionPreference = 'SilentlyContinue'
-Get-PnpDevice -Class DiskDrive | Where-Object { $_.InstanceId -like 'USBSTOR\*' -and $_.Status -ne 'OK' } | ForEach-Object {
-  Enable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false
+    // enable ตาม id ที่จำไว้ (แม่นสุด — ครอบ UASP ด้วย)
+    final ids = _winDisabledUsbIds.toList();
+    _winDisabledUsbIds.clear();
+    final idLines = ids.map((i) => "Enable-PnpDevice -InstanceId '${i.replaceAll("'", "''")}' -Confirm:\$false").join('\n');
+    // fallback: USBSTOR ที่ยัง error (เผื่อ agent restart ระหว่าง blocked แล้วลืม id)
+    final script = '''
+\$ErrorActionPreference = 'SilentlyContinue'
+$idLines
+Get-PnpDevice -Class DiskDrive | Where-Object { \$_.InstanceId -like 'USBSTOR\\*' -and \$_.Status -ne 'OK' } | ForEach-Object {
+  Enable-PnpDevice -InstanceId \$_.InstanceId -Confirm:\$false
 }
 ''';
     try {
