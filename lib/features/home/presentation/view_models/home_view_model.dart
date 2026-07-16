@@ -284,7 +284,35 @@ $pid = [uint32]0
     if (block) await _dismountAllWindowsRemovable();
   }
 
-  // ไล่ unmount ทุก removable drive ที่ mount อยู่ตอนนี้ + รายงาน (เรียกตอน policy flip → block)
+  // Eject drive ออกจริง (Safely Remove Hardware) ผ่าน Shell verb — device หายจาก Explorer สนิท
+  // (ต่างจาก mountvol /P ที่แค่ dismount → ยังเห็น icon แต่เปิดไม่ได้). ไม่ลบ/format ข้อมูลใดๆ
+  // ⚠️ verb name ต่างตาม locale (EN "Eject" / TH "นำสื่อออก"/"นำออก") → loop verbs match pattern
+  //    ปลอดภัยกว่า InvokeVerb("Eject") ตรงๆ; fallback InvokeVerb + mountvol /P ถ้า eject ไม่ได้
+  Future<void> _ejectWindowsDrive(String letter) async {
+    final l = letter.replaceAll(':', '').replaceAll('\\', '');
+    final script = '''
+\$ErrorActionPreference = 'SilentlyContinue'
+\$sh = New-Object -ComObject Shell.Application
+\$item = \$sh.Namespace(17).ParseName("$l:")
+if (\$item) {
+  \$done = \$false
+  foreach (\$v in \$item.Verbs()) {
+    \$n = \$v.Name -replace '&',''
+    if (\$n -match 'Eject|นำสื่อออก|นำออก|ดีดออก') { \$v.DoIt(); \$done = \$true; break }
+  }
+  if (-not \$done) { \$item.InvokeVerb("Eject") }
+}
+''';
+    try {
+      await Process.run('powershell', _psArgs(script, hidden: true));
+    } catch (_) {}
+    // เผื่อ eject verb ไม่ทำงาน (บาง drive/บาง Windows) — dismount + กัน remount เป็น fallback
+    try {
+      await Process.run('mountvol', ['$l:\\', '/P']);
+    } catch (_) {}
+  }
+
+  // ไล่ eject ทุก removable drive ที่ mount อยู่ตอนนี้ + รายงาน (เรียกตอน policy flip → block)
   Future<void> _dismountAllWindowsRemovable() async {
     const script = r'''
 Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_.DeviceID)|$($_.VolumeName)" }
@@ -299,9 +327,7 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
         final letter = parts.isNotEmpty ? parts[0].trim() : '';
         if (letter.isEmpty) continue;
         final label = parts.length > 1 ? parts[1].trim() : '';
-        try {
-          await Process.run('mountvol', ['$letter\\', '/P']); // dismount + กัน auto-remount
-        } catch (_) {}
+        await _ejectWindowsDrive(letter); // eject ออกจริง (Safely Remove)
         await _reportUsbBlock(label.isNotEmpty ? label : letter);
       }
     } catch (_) {}
@@ -348,10 +374,7 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
           if (!_allowUsb) {
             final label = current[letter] ?? '';
             final deviceName = label.isNotEmpty ? label : letter;
-            try {
-              // dismount + ป้องกัน auto-remount ของ drive letter นี้ (ไม่ format/ลบข้อมูลใดๆ)
-              await Process.run('mountvol', ['$letter\\', '/P']);
-            } catch (_) {}
+            await _ejectWindowsDrive(letter); // eject ออกจริง (Safely Remove) — ไม่ format/ลบข้อมูล
             await _reportUsbBlock(deviceName);
           }
         }
