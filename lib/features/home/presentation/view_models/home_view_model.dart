@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../data/models/device_model.dart';
 import '../../../auth/models/login_response_model.dart';
 import '../../../../core/services/network_manager.dart';
@@ -51,6 +52,12 @@ class HomeViewModel extends ChangeNotifier {
   String _remoteSessionId = ''; // session ที่กำลัง active (ใช้ตอนผู้ใช้กด Disconnect เอง)
   Process? _winIndicatorProc;   // Windows: process ของ topmost banner form (kill ตอน stop)
   bool _winIndicatorStopByUs = false; // true = เรา kill เอง (normal stop); false = user กดปุ่มหยุด
+
+  // WebRTC (low-latency upgrade) — สร้างเมื่อได้ SDP offer จาก viewer ผ่าน SSE
+  RTCPeerConnection? _remotePc;
+  MediaStream? _remoteScreenStream;
+  // ตอน WebRTC ต่อติด: ลด HTTP frame upload เหลือ interval ช้า (fallback + keep-alive)
+  static const _remoteFrameIntervalSlow = Duration(seconds: 3);
   // interval ระหว่างเฟรม (~2.5 fps) — สมดุลระหว่าง smoothness กับ bandwidth/CPU
   static const _remoteFrameInterval = Duration(milliseconds: 400);
 
@@ -71,6 +78,7 @@ class HomeViewModel extends ChangeNotifier {
     _remoteCaptureTimer?.cancel();
     _remoteEventSub?.cancel();
     _winIndicatorProc?.kill();
+    _stopWebrtc();
     super.dispose();
   }
 
@@ -422,6 +430,9 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
       case 'remote_start':
         _onRemoteStart(m['sessionId'] as String? ?? '', m['by'] as String? ?? 'ผู้ดูแลระบบ');
         break;
+      case 'remote_offer':
+        _onRemoteOffer(m['sessionId'] as String? ?? '', m['sdp'] as String? ?? '');
+        break;
       case 'remote_stop':
         _stopRemoteCapture();
         break;
@@ -461,10 +472,98 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
     _remoteCaptureTimer = null;
     _remoteSessionId = '';
     _hideRemoteIndicator();
+    _stopWebrtc();
     // macOS: หยุด SCStream → macOS ปิด screen-recording indicator (ไอคอนม่วง) ทันที
     if (Platform.isMacOS) {
       _remoteChannel.invokeMethod('stopCapture').catchError((_) => null);
     }
+  }
+
+  // ── WebRTC (low-latency upgrade — vanilla ICE) ────────────
+  //
+  // viewer วาง SDP offer → backend push SSE remote_offer → agent capture หน้าจอเป็น
+  // video track (getDisplayMedia) → ตอบ answer → media ไหล P2P (ผ่าน STUN, ไม่มี TURN).
+  // HTTP frame upload เดิมยังรันเป็น fallback — WebRTC ต่อติดแล้วลดเหลือทุก 3s (keep-alive)
+
+  Future<void> _onRemoteOffer(String sessionId, String offerSdp) async {
+    if (sessionId.isEmpty || offerSdp.isEmpty) return;
+    if (_remoteSessionId != sessionId) return; // ยังไม่ผ่าน consent / session อื่น
+    await _stopWebrtc(); // ทิ้ง pc เก่าถ้ามี (offer ใหม่ทับ)
+    try {
+      final pc = await createPeerConnection({
+        'iceServers': [
+          {'urls': 'stun:stun.l.google.com:19302'},
+        ],
+      });
+      _remotePc = pc;
+      // capture หน้าจอหลักเป็น video track (flutter_webrtc desktop รองรับ getDisplayMedia)
+      final stream = await navigator.mediaDevices.getDisplayMedia({
+        'video': {'frameRate': 15},
+        'audio': false,
+      });
+      _remoteScreenStream = stream;
+      for (final track in stream.getTracks()) {
+        await pc.addTrack(track, stream);
+      }
+      pc.onConnectionState = (state) {
+        if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+          // media ไหล P2P แล้ว — ลด HTTP upload เหลือ keep-alive (ประหยัด bandwidth/CPU)
+          _remoteCaptureTimer?.cancel();
+          _remoteCaptureTimer =
+              Timer.periodic(_remoteFrameIntervalSlow, (_) => _captureAndUpload());
+        } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+            state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+          // WebRTC หลุด — กลับ HTTP polling เต็มความถี่ (ถ้า session ยัง active)
+          if (_remoteSessionId.isNotEmpty) {
+            _remoteCaptureTimer?.cancel();
+            _remoteCaptureTimer =
+                Timer.periodic(_remoteFrameInterval, (_) => _captureAndUpload());
+          }
+        }
+      };
+      await pc.setRemoteDescription(RTCSessionDescription(offerSdp, 'offer'));
+      final answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await _waitIceComplete(pc);
+      final local = await pc.getLocalDescription();
+      final sdp = local?.sdp;
+      if (sdp == null || sdp.isEmpty) return;
+      await NetworkManager.instance.postV3(
+          '/v3/api/device/remote/answer', {'sessionId': sessionId, 'sdp': sdp});
+    } catch (_) {
+      // WebRTC ใช้ไม่ได้ (permission/แพลตฟอร์ม/เครือข่าย) — ทิ้งเงียบ, HTTP polling ทำงานต่อ
+      await _stopWebrtc();
+    }
+  }
+
+  // vanilla ICE: รอ gathering ครบ (สูงสุด 3s) ก่อนส่ง SDP — candidate ฝังใน SDP แล้ว
+  Future<void> _waitIceComplete(RTCPeerConnection pc) async {
+    if (pc.iceGatheringState ==
+        RTCIceGatheringState.RTCIceGatheringStateComplete) {
+      return;
+    }
+    final done = Completer<void>();
+    pc.onIceGatheringState = (state) {
+      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete &&
+          !done.isCompleted) {
+        done.complete();
+      }
+    };
+    await done.future.timeout(const Duration(seconds: 3), onTimeout: () {});
+  }
+
+  Future<void> _stopWebrtc() async {
+    try {
+      for (final t in _remoteScreenStream?.getTracks() ?? <MediaStreamTrack>[]) {
+        await t.stop();
+      }
+      await _remoteScreenStream?.dispose();
+    } catch (_) {}
+    _remoteScreenStream = null;
+    try {
+      await _remotePc?.close();
+    } catch (_) {}
+    _remotePc = null;
   }
 
   // ── consent / indicator / capture — branch ตาม platform ──

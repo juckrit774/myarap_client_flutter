@@ -3,22 +3,33 @@ PODS:
     - FlutterMacOS
   - file_picker (0.0.1):
     - FlutterMacOS
+  - flutter_webrtc (1.4.0):
+    - FlutterMacOS
+    - WebRTC-SDK (= 144.7559.09)
   - FlutterMacOS (1.0.0)
   - shared_preferences_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
+  - WebRTC-SDK (144.7559.09)
 
 DEPENDENCIES:
   - device_info_plus (from `Flutter/ephemeral/.symlinks/plugins/device_info_plus/macos`)
   - file_picker (from `Flutter/ephemeral/.symlinks/plugins/file_picker/macos`)
+  - flutter_webrtc (from `Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
   - shared_preferences_foundation (from `Flutter/ephemeral/.symlinks/plugins/shared_preferences_foundation/darwin`)
+
+SPEC REPOS:
+  trunk:
+    - WebRTC-SDK
 
 EXTERNAL SOURCES:
   device_info_plus:
     :path: Flutter/ephemeral/.symlinks/plugins/device_info_plus/macos
   file_picker:
     :path: Flutter/ephemeral/.symlinks/plugins/file_picker/macos
+  flutter_webrtc:
+    :path: Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos
   FlutterMacOS:
     :path: Flutter/ephemeral
   shared_preferences_foundation:
@@ -27,8 +38,10 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   device_info_plus: a56e6e74dbbd2bb92f2da12c64ddd4f67a749041
   file_picker: 7584aae6fa07a041af2b36a2655122d42f578c1a
+  flutter_webrtc: fec3dc9284a1f6d21ec2caa91c90bb4c1824eb04
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
+  WebRTC-SDK: e6006119cd730d6315d875e4a421b6cc8bb88833
 
 PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
 
