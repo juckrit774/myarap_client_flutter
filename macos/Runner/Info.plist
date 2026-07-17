@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSLocationUsageDescription</key>
+	<string>MYARAP Agent uses your approximate location (WiFi-based) to show device location to IT admins for asset tracking.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>MYARAP Agent uses your approximate location (WiFi-based) to show device location to IT admins for asset tracking.</string>
 </dict>
 </plist>

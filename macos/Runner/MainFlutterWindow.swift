@@ -4,6 +4,10 @@ import DiskArbitration
 import ScreenCaptureKit
 import CoreMedia
 import CoreImage
+import Darwin      // host_statistics/host_statistics64 (CPU/Memory), getifaddrs (Network), proc_listpids/proc_pidinfo (libproc — Process/Thread count) — sandbox-safe read-only APIs
+import IOKit       // IOServiceMatching/IORegistryEntryCreateCFProperty (Disk IO stats)
+import IOKit.ps    // IOPSCopyPowerSourcesInfo (Energy/Battery) — public API, sandbox-safe, ไม่ต้อง entitlement เพิ่ม
+import CoreLocation // POC: WiFi-based location (ไม่ใช่ GPS จริง — laptop ไม่มี GPS chip) ต้อง entitlement personal-information.location + Info.plist usage description
 
 // unified logging redact string-interpolated NSLog content เป็น <private> โดย default
 // (ต้อง %{public}@ ชัดเจนถึงจะเห็นค่าจริงใน `log stream`/Console.app) — ใช้ debug ตอนพัฒนา
@@ -31,6 +35,241 @@ func dlog(_ s: String) {
 // ScreenCapture: capture หน้าจอหลัก → JPEG data URL (สำหรับ Remote Desktop view-only)
 // ใช้ CGDisplayCreateImage (ต้องขอ Screen Recording permission ครั้งแรก — TCC prompt)
 // deprecated ใน macOS 15 แต่ยังทำงาน; ScreenCaptureKit เป็น async ซับซ้อนกว่ามาก ยังไม่ใช้ใน POC นี้
+// SystemMetrics: เก็บค่า Activity Monitor (CPU/Memory/Energy/Disk/Network) แบบ native ล้วน —
+// แอปนี้ app-sandbox=true (ดู entitlements) → Process/NSTask shell out ไป top/vm_stat/netstat
+// ใช้ไม่ได้ (บทเรียนเดิมจาก USB Control) ต้องใช้ Mach/IOKit/POSIX API ที่อ่านอย่างเดียวเท่านั้น
+enum SystemMetrics {
+  // เรียกบน background queue เสมอ — มี blocking sleep สั้นๆ สำหรับ delta sampling (CPU/Network/Disk)
+  static func collect(completion: @escaping ([String: Any]) -> Void) {
+    DispatchQueue.global(qos: .utility).async {
+      let cpu = cpuUsage()
+      let mem = memoryUsage()
+      let disk = diskUsage()
+      let diskIO = diskIOThroughput()
+      let net = networkThroughput()
+      let energy = energyInfo()
+      let proc = processStats()
+      let out: [String: Any] = [
+        "cpuSystemPct": cpu.system, "cpuUserPct": cpu.user, "cpuIdlePct": cpu.idle,
+        "cpuThreads": proc.threads, "cpuProcesses": proc.processes,
+        "memPhysicalGB": mem.physicalGB, "memUsedGB": mem.usedGB,
+        "memCachedGB": mem.cachedGB, "memSwapUsedGB": mem.swapUsedGB,
+        "memAppGB": mem.appGB, "memWiredGB": mem.wiredGB, "memCompressedGB": mem.compressedGB,
+        "diskFreeGB": disk.freeGB, "diskUsedGB": disk.usedGB, "diskTotalGB": disk.totalGB,
+        "diskReadsCount": diskIO.readsCount, "diskWritesCount": diskIO.writesCount,
+        "diskReadsPerSec": diskIO.readsPerSec, "diskWritesPerSec": diskIO.writesPerSec,
+        "diskDataReadGB": diskIO.dataReadGB, "diskDataWrittenGB": diskIO.dataWrittenGB,
+        "diskReadKBs": diskIO.readKBs, "diskWriteKBs": diskIO.writeKBs,
+        "netRxKBs": net.rxKBs, "netTxKBs": net.txKBs,
+        "netPacketsIn": net.packetsIn, "netPacketsOut": net.packetsOut,
+        "netPacketsInPerSec": net.packetsInPerSec, "netPacketsOutPerSec": net.packetsOutPerSec,
+        "netDataReceivedGB": net.dataReceivedGB, "netDataSentGB": net.dataSentGB,
+        "hasBattery": energy.hasBattery, "batteryPct": energy.batteryPct,
+        "batteryCharged": energy.charged, "timeOnACMinutes": energy.timeOnACMinutes,
+        // Energy Impact ไม่มี public API ให้ real wattage (ต้อง IOReport/root) — ใช้ non-idle CPU
+        // % เป็น proxy สำหรับกราฟเท่านั้น (documented approximation, ดู memory: activity-monitor-status)
+        "energyImpactPct": cpu.system + cpu.user,
+      ]
+      DispatchQueue.main.async { completion(out) }
+    }
+  }
+
+  // ---- CPU: System/User/Idle % ผ่าน host_statistics(HOST_CPU_LOAD_INFO), delta sampling 300ms ----
+  private static func cpuTicks() -> (user: UInt32, system: UInt32, idle: UInt32, nice: UInt32)? {
+    var cpuLoad = host_cpu_load_info()
+    var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+    let result = withUnsafeMutablePointer(to: &cpuLoad) {
+      $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+        host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+      }
+    }
+    guard result == KERN_SUCCESS else { return nil }
+    let t = cpuLoad.cpu_ticks
+    // CPU_STATE_USER=0, CPU_STATE_SYSTEM=1, CPU_STATE_IDLE=2, CPU_STATE_NICE=3 (<mach/machine.h>)
+    return (t.0, t.1, t.2, t.3)
+  }
+
+  private static func cpuUsage() -> (system: Double, user: Double, idle: Double) {
+    guard let t0 = cpuTicks() else { return (0, 0, 0) }
+    Thread.sleep(forTimeInterval: 0.3)
+    guard let t1 = cpuTicks() else { return (0, 0, 0) }
+    let dUser = Double(t1.user &- t0.user)
+    let dSystem = Double(t1.system &- t0.system)
+    let dIdle = Double(t1.idle &- t0.idle)
+    let dNice = Double(t1.nice &- t0.nice)
+    let total = dUser + dSystem + dIdle + dNice
+    guard total > 0 else { return (0, 0, 100) }
+    return (dSystem / total * 100, (dUser + dNice) / total * 100, dIdle / total * 100)
+  }
+
+  // ---- Memory: host_statistics64(HOST_VM_INFO64) — สูตรเดียวกับที่ Activity Monitor ใช้ ----
+  // App/Wired/Compressed ต้องรวมกันได้ = usedGB เสมอ (by construction — App=active, ไม่ใช่สูตร
+  // private ที่แท้จริงของ Apple ซึ่งไม่เปิดเผย แต่เป็น approximation ที่ tool โอเพนซอร์สหลายตัวใช้)
+  private static func memoryUsage() -> (physicalGB: Double, usedGB: Double, cachedGB: Double,
+                                         swapUsedGB: Double, appGB: Double, wiredGB: Double, compressedGB: Double) {
+    var pageSize: vm_size_t = 0
+    host_page_size(mach_host_self(), &pageSize)
+    var vmStat = vm_statistics64()
+    var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+    let result = withUnsafeMutablePointer(to: &vmStat) {
+      $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+        host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+      }
+    }
+    let gb = Double(pageSize) / 1_073_741_824.0
+    guard result == KERN_SUCCESS else { return (0, 0, 0, 0, 0, 0, 0) }
+    let physicalGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+    let appGB = Double(vmStat.active_count) * gb
+    let wiredGB = Double(vmStat.wire_count) * gb
+    let compressedGB = Double(vmStat.compressor_page_count) * gb
+    // Used = App Memory + Wired + Compressed (สูตร "Memory Used" ของ Activity Monitor)
+    let usedGB = appGB + wiredGB + compressedGB
+    let cachedGB = Double(vmStat.external_page_count) * gb // "Cached Files" (file-backed pages)
+    var swapUsage = xsw_usage()
+    var size = MemoryLayout<xsw_usage>.size
+    sysctlbyname("vm.swapusage", &swapUsage, &size, nil, 0)
+    let swapUsedGB = Double(swapUsage.xsu_used) / 1_073_741_824.0
+    return (physicalGB, usedGB, cachedGB, swapUsedGB, appGB, wiredGB, compressedGB)
+  }
+
+  // ---- Disk: volume capacity ของ "/" (ไม่ใช่ IOKit read/write IOPS — ตัดสินใจ simplify) ----
+  private static func diskUsage() -> (freeGB: Double, usedGB: Double, totalGB: Double) {
+    guard let values = try? URL(fileURLWithPath: "/").resourceValues(
+      forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),
+      let total = values.volumeTotalCapacity else { return (0, 0, 0) }
+    let avail = values.volumeAvailableCapacityForImportantUsage ?? 0
+    let totalGB = Double(total) / 1_073_741_824.0
+    let freeGB = Double(avail) / 1_073_741_824.0
+    return (freeGB, max(0, totalGB - freeGB), totalGB)
+  }
+
+  // ---- Network: getifaddrs delta sampling 500ms (รวมทุก interface en*, ข้าม loopback) ----
+  // คืนทั้ง cumulative counter (ตั้งแต่ boot — ใช้แสดง "Data received/sent"/"Packets in/out" ตรงๆ)
+  // และ rate (คำนวณจาก delta ของ sampling window — ใช้แสดง "…/sec")
+  private static func networkCounters() -> (rxBytes: UInt64, txBytes: UInt64, rxPackets: UInt64, txPackets: UInt64) {
+    var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddrPtr) == 0, let first = ifaddrPtr else { return (0, 0, 0, 0) }
+    defer { freeifaddrs(ifaddrPtr) }
+    var rxB: UInt64 = 0, txB: UInt64 = 0, rxP: UInt64 = 0, txP: UInt64 = 0
+    var ptr: UnsafeMutablePointer<ifaddrs>? = first
+    while let p = ptr {
+      let ifa = p.pointee
+      let name = String(cString: ifa.ifa_name)
+      if name.hasPrefix("en"), let data = ifa.ifa_data {
+        let netData = data.assumingMemoryBound(to: if_data.self).pointee
+        rxB += UInt64(netData.ifi_ibytes); txB += UInt64(netData.ifi_obytes)
+        rxP += UInt64(netData.ifi_ipackets); txP += UInt64(netData.ifi_opackets)
+      }
+      ptr = ifa.ifa_next
+    }
+    return (rxB, txB, rxP, txP)
+  }
+
+  private static func networkThroughput() -> (rxKBs: Double, txKBs: Double, packetsIn: UInt64, packetsOut: UInt64,
+                                                packetsInPerSec: Double, packetsOutPerSec: Double,
+                                                dataReceivedGB: Double, dataSentGB: Double) {
+    let t0 = networkCounters()
+    Thread.sleep(forTimeInterval: 0.5)
+    let t1 = networkCounters()
+    let rxKBs = max(0, Double(t1.rxBytes &- t0.rxBytes) / 1024.0 / 0.5)
+    let txKBs = max(0, Double(t1.txBytes &- t0.txBytes) / 1024.0 / 0.5)
+    let pInSec = max(0, Double(t1.rxPackets &- t0.rxPackets) / 0.5)
+    let pOutSec = max(0, Double(t1.txPackets &- t0.txPackets) / 0.5)
+    return (rxKBs, txKBs, t1.rxPackets, t1.txPackets, pInSec, pOutSec,
+            Double(t1.rxBytes) / 1_073_741_824.0, Double(t1.txBytes) / 1_073_741_824.0)
+  }
+
+  // ---- Disk IO: IOKit IOBlockStorageDriver "Statistics" property (public, sandbox-safe read) ----
+  // คืนทั้ง cumulative operations/bytes (ตั้งแต่ boot) และ rate ที่คำนวณจาก delta 500ms
+  private static func diskIOCounters() -> (reads: UInt64, writes: UInt64, readBytes: UInt64, writeBytes: UInt64) {
+    var totalReads: UInt64 = 0, totalWrites: UInt64 = 0, totalReadBytes: UInt64 = 0, totalWriteBytes: UInt64 = 0
+    var iter: io_iterator_t = 0
+    let matching = IOServiceMatching("IOBlockStorageDriver")
+    // kIOMasterPortDefault (deprecated name, ไม่ใช่ kIOMainPortDefault) — deployment target ของ
+    // แอปนี้คือ macOS 10.15 ซึ่ง kIOMainPortDefault (12.0+) ยังไม่มี, ตัวเก่ายังทำงานได้ปกติ
+    guard IOServiceGetMatchingServices(kIOMasterPortDefault, matching, &iter) == KERN_SUCCESS else { return (0, 0, 0, 0) }
+    defer { IOObjectRelease(iter) }
+    var service = IOIteratorNext(iter)
+    while service != 0 {
+      defer { IOObjectRelease(service); service = IOIteratorNext(iter) }
+      guard let cfProp = IORegistryEntryCreateCFProperty(service, "Statistics" as CFString, kCFAllocatorDefault, 0) else { continue }
+      guard let dict = cfProp.takeRetainedValue() as? [String: Any] else { continue }
+      if let v = dict["Operations (Read)"] as? UInt64 { totalReads += v }
+      if let v = dict["Operations (Write)"] as? UInt64 { totalWrites += v }
+      if let v = dict["Bytes (Read)"] as? UInt64 { totalReadBytes += v }
+      if let v = dict["Bytes (Write)"] as? UInt64 { totalWriteBytes += v }
+    }
+    return (totalReads, totalWrites, totalReadBytes, totalWriteBytes)
+  }
+
+  private static func diskIOThroughput() -> (readsCount: UInt64, writesCount: UInt64, readsPerSec: Double,
+                                              writesPerSec: Double, dataReadGB: Double, dataWrittenGB: Double,
+                                              readKBs: Double, writeKBs: Double) {
+    let t0 = diskIOCounters()
+    Thread.sleep(forTimeInterval: 0.5)
+    let t1 = diskIOCounters()
+    let readsPerSec = max(0, Double(t1.reads &- t0.reads) / 0.5)
+    let writesPerSec = max(0, Double(t1.writes &- t0.writes) / 0.5)
+    let readKBs = max(0, Double(t1.readBytes &- t0.readBytes) / 1024.0 / 0.5)
+    let writeKBs = max(0, Double(t1.writeBytes &- t0.writeBytes) / 1024.0 / 0.5)
+    return (t1.reads, t1.writes, readsPerSec, writesPerSec,
+            Double(t1.readBytes) / 1_073_741_824.0, Double(t1.writeBytes) / 1_073_741_824.0, readKBs, writeKBs)
+  }
+
+  // ---- Process/Thread count — proc_listpids (libproc, sandbox-safe: enumerating PIDs ไม่ต้อง
+  // เป็นเจ้าของ process) แต่ proc_pidinfo(PROC_PIDTASKINFO) ของ process อื่นที่ไม่ใช่ของเราเอง
+  // จะ fail (ต้องเป็นเจ้าของ/root) → thread count นี่ "undercounted" เทียบกับ Activity Monitor
+  // จริงที่รันด้วยสิทธิ์สูงกว่า — documented limitation ไม่ใช่บั๊ก (ดู memory: activity-monitor-status)
+  private static func processStats() -> (processes: Int, threads: Int) {
+    let bufSize = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
+    guard bufSize > 0 else { return (0, 0) }
+    let count = Int(bufSize) / MemoryLayout<pid_t>.size
+    var pids = [pid_t](repeating: 0, count: count)
+    let actualSize = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids, bufSize)
+    guard actualSize > 0 else { return (0, 0) }
+    let actualCount = Int(actualSize) / MemoryLayout<pid_t>.size
+    var threadTotal = 0
+    for i in 0..<actualCount where pids[i] != 0 {
+      var info = proc_taskinfo()
+      let size = Int32(MemoryLayout<proc_taskinfo>.size)
+      if proc_pidinfo(pids[i], PROC_PIDTASKINFO, 0, &info, size) == size {
+        threadTotal += Int(info.pti_threadnum)
+      }
+    }
+    return (actualCount, threadTotal)
+  }
+
+  // ---- Energy (battery) — IOPSCopyPowerSourcesInfo (public IOKit API, sandbox-safe) ----
+  // "Time on AC" ไม่มี system API ให้ตรงๆ — track เอง in-process (reset ทุกครั้ง agent restart,
+  // ยอมรับเป็น approximation สำหรับ POC — ไม่ persist ข้าม launch)
+  private static var acConnectedSince: Date?
+
+  private static func energyInfo() -> (hasBattery: Bool, batteryPct: Double, charged: Bool, timeOnACMinutes: Double) {
+    let blob = IOPSCopyPowerSourcesInfo().takeRetainedValue()
+    let sources = IOPSCopyPowerSourcesList(blob).takeRetainedValue() as [CFTypeRef]
+    guard let first = sources.first,
+          let desc = IOPSGetPowerSourceDescription(blob, first)?.takeUnretainedValue() as? [String: Any] else {
+      // ไม่มีแบตเลย (desktop Mac) = ใช้ไฟบ้านตลอด ไม่มี power source ให้เช็คสถานะ AC/battery
+      if acConnectedSince == nil { acConnectedSince = Date() }
+      let mins = Date().timeIntervalSince(acConnectedSince!) / 60
+      return (false, 0, false, mins)
+    }
+    let current = desc[kIOPSCurrentCapacityKey] as? Int ?? 0
+    let maxCap = desc[kIOPSMaxCapacityKey] as? Int ?? 100
+    let pct = maxCap > 0 ? Double(current) / Double(maxCap) * 100 : 0
+    let charged = desc[kIOPSIsChargedKey] as? Bool ?? false
+    let state = desc[kIOPSPowerSourceStateKey] as? String ?? ""
+    let onAC = state == kIOPSACPowerValue
+    if onAC {
+      if acConnectedSince == nil { acConnectedSince = Date() }
+    } else {
+      acConnectedSince = nil
+    }
+    let mins = acConnectedSince.map { Date().timeIntervalSince($0) / 60 } ?? 0
+    return (true, pct, charged, mins)
+  }
+}
+
 enum ScreenCapture {
   static func capture(maxWidth: Int, quality: Double, result: @escaping FlutterResult) {
     DispatchQueue.global(qos: .userInitiated).async {
@@ -72,6 +311,58 @@ enum ScreenCapture {
   }
 }
 
+// LocationProvider: WiFi-based location ผ่าน CoreLocation (POC — เครื่อง desktop/laptop ไม่มี GPS chip
+// จริง, ใช้ WiFi-AP database ของ Apple แทน — ความแม่นยำระดับอาคาร/ย่าน ไม่ใช่ระดับห้อง)
+// ต้องขอ authorization ครั้งแรก (macOS โชว์ system prompt) — ถ้า user ปฏิเสธ/ยังไม่ตัดสินใจ คืน nil เงียบๆ
+// ไม่บล็อก metrics round อื่น (เหมือน pattern อื่นๆ ใน SystemMetrics — best-effort)
+final class LocationProvider: NSObject, CLLocationManagerDelegate {
+  static let shared = LocationProvider()
+  private let manager = CLLocationManager()
+  private var pending: ((CLLocationCoordinate2D?) -> Void)?
+
+  override init() {
+    super.init()
+    manager.delegate = self
+  }
+
+  // ใช้ class method CLLocationManager.authorizationStatus() (deprecated แต่รองรับ macOS 10.15+)
+  // แทน instance property .authorizationStatus (ต้อง macOS 11+) — deployment target โปรเจกต์นี้คือ 10.15
+  func requestLocation(completion: @escaping (CLLocationCoordinate2D?) -> Void) {
+    guard CLLocationManager.locationServicesEnabled() else { completion(nil); return }
+    pending = completion
+    switch CLLocationManager.authorizationStatus() {
+    case .notDetermined:
+      manager.requestAlwaysAuthorization() // เจอ system prompt ครั้งแรก — ผลจะมาที่ locationManager(didChangeAuthorization:)
+    case .authorizedAlways:
+      manager.requestLocation()
+    default: // .denied / .restricted
+      pending?(nil)
+      pending = nil
+    }
+  }
+
+  // delegate แบบเก่า (macOS 10.15-compatible) — รับ status เป็น parameter ตรงๆ แทนอ่านจาก property
+  func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+    guard pending != nil else { return }
+    if status == .authorizedAlways {
+      manager.requestLocation()
+    } else if status == .denied || status == .restricted {
+      pending?(nil)
+      pending = nil
+    }
+  }
+
+  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    pending?(locations.first?.coordinate)
+    pending = nil
+  }
+
+  func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+    pending?(nil)
+    pending = nil
+  }
+}
+
 // RemoteCapture: capture ต่อเนื่องด้วย ScreenCaptureKit (SCStream) — macOS 12.3+
 // เหตุผลที่ใช้แทน CGDisplayCreateImage: macOS ผูก "screen recording indicator" (ไอคอนม่วง
 // Control Center) เข้ากับ lifecycle ของ SCStream โดยตรง → หยุด stream = indicator หายทันที
@@ -84,8 +375,8 @@ final class RemoteCapture: NSObject, SCStreamOutput {
   private let ciContext = CIContext()
   private let lock = NSLock()
   private var latestJPEG: Data?
-  private var maxWidth: Int = 1280
-  private var quality: Double = 0.5
+  private var maxWidth: Int = 1920
+  private var quality: Double = 1.0
   private(set) var running = false
 
   func start(maxWidth: Int, quality: Double) {
@@ -522,8 +813,8 @@ class MainFlutterWindow: NSWindow {
       case "startCapture":
         // เริ่ม SCStream (indicator ม่วงขึ้น) — macOS 12.3+; OS เก่ากว่าใช้ one-shot fallback
         let args = call.arguments as? [String: Any]
-        let maxW = args?["maxWidth"] as? Int ?? 1280
-        let quality = args?["quality"] as? Double ?? 0.5
+        let maxW = args?["maxWidth"] as? Int ?? 1920
+        let quality = args?["quality"] as? Double ?? 1.0
         if #available(macOS 12.3, *) {
           RemoteCapture.shared.start(maxWidth: maxW, quality: quality)
         }
@@ -536,8 +827,8 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "captureScreen":
         let args = call.arguments as? [String: Any]
-        let maxW = args?["maxWidth"] as? Int ?? 1280
-        let quality = args?["quality"] as? Double ?? 0.5
+        let maxW = args?["maxWidth"] as? Int ?? 1920
+        let quality = args?["quality"] as? Double ?? 1.0
         // ถ้า SCStream กำลังรัน คืนเฟรมล่าสุด (indicator คุมโดย stream); ไม่งั้น one-shot fallback
         if #available(macOS 12.3, *), RemoteCapture.shared.running {
           result(RemoteCapture.shared.latestFrameDataURL())
@@ -555,6 +846,25 @@ class MainFlutterWindow: NSWindow {
       case "hideIndicator":
         RemoteConsent.hideIndicator()
         result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    // Activity Monitor card (Asset Detail): CPU/Memory/Energy/Disk/Network — native, sandbox-safe
+    let metricsChannel = FlutterMethodChannel(name: "com.myarap/metrics", binaryMessenger: messenger)
+    metricsChannel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "collect":
+        SystemMetrics.collect { data in result(data) }
+      case "location":
+        LocationProvider.shared.requestLocation { coord in
+          if let c = coord {
+            result(["lat": c.latitude, "lng": c.longitude])
+          } else {
+            result(nil)
+          }
+        }
       default:
         result(FlutterMethodNotImplemented)
       }

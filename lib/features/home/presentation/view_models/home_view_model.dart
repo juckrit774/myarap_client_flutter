@@ -62,6 +62,13 @@ class HomeViewModel extends ChangeNotifier {
   // interval ระหว่างเฟรม (~2.5 fps) — สมดุลระหว่าง smoothness กับ bandwidth/CPU
   static const _remoteFrameInterval = Duration(milliseconds: 400);
 
+  // Activity Monitor (Asset Detail card) — CPU/Memory/Energy/Disk/Network
+  // 2 trigger: (1) periodic self-report ทุก 5 นาที (เก็บ daily avg ฝั่ง backend)
+  //            (2) SSE "metrics_request" ตอน viewer เปิด Asset Detail (live pull ทันที)
+  static const _metricsChannel = MethodChannel('com.myarap/metrics');
+  static const _metricsInterval = Duration(minutes: 5);
+  Timer? _metricsTimer;
+
   String get userName => deviceDetail?.computerName ?? _deviceAuth?.assetTag ?? 'MYARAP User';
   String get assetNo => _deviceAuth?.assetTag ?? '-';
   String? get profileImageUrl => null;
@@ -80,6 +87,7 @@ class HomeViewModel extends ChangeNotifier {
     _remoteEventSub?.cancel();
     _winIndicatorProc?.kill();
     _stopWebrtc();
+    _metricsTimer?.cancel();
     super.dispose();
   }
 
@@ -111,6 +119,9 @@ class HomeViewModel extends ChangeNotifier {
     // เริ่ม listen event app เปลี่ยน
     if (Platform.isMacOS) _listenAppEvents();
     if (Platform.isWindows) _startWindowsAppPolling();
+
+    // Activity Monitor periodic self-report (เก็บ daily avg ฝั่ง backend ทุกรอบ) — ทั้ง 2 platform
+    if (Platform.isMacOS || Platform.isWindows) _startMetricsTimer();
 
     isLoading = false;
     notifyListeners();
@@ -476,7 +487,199 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
       case 'remote_stop':
         _stopRemoteCapture();
         break;
+      case 'metrics_request':
+        // viewer เปิด Asset Detail → ขอวัดค่าตอนนี้เลย (Activity Monitor card, live pull)
+        _collectAndSendMetrics();
+        break;
     }
+  }
+
+  // ── Activity Monitor (CPU/Memory/Energy/Disk/Network) ─────
+  //
+  // ยิงเข้า POST /v3/api/device/metrics เหมือนกันทั้ง 2 trigger (periodic self-report ทุก
+  // _metricsInterval + on-demand ตอน backend push metrics_request) — backend แยกใช้เอง:
+  // เก็บเป็น "ค่าสด" ให้ viewer poll (live card) และ roll-up เข้า daily avg พร้อมกันในคราวเดียว
+
+  void _startMetricsTimer() {
+    _collectAndSendMetrics(); // ยิงทันทีรอบแรก ไม่ต้องรอครบ 5 นาทีก่อน
+    _metricsTimer = Timer.periodic(_metricsInterval, (_) => _collectAndSendMetrics());
+  }
+
+  Future<void> _collectAndSendMetrics() async {
+    try {
+      Map<String, dynamic> data;
+      if (Platform.isMacOS) {
+        final raw = await _metricsChannel.invokeMethod('collect');
+        data = Map<String, dynamic>.from(raw as Map);
+        try {
+          // timeout กันเคส user ยังไม่กด Allow/Deny บน system prompt ครั้งแรก — ไม่ให้ metrics
+          // round นี้ค้างรอ user ตัดสินใจ (รอบถัดไปจะลองใหม่เอง ถ้า permission ตัดสินใจแล้วจะเร็วปกติ)
+          final loc = await _metricsChannel
+              .invokeMethod('location')
+              .timeout(const Duration(seconds: 5));
+          if (loc != null) {
+            final m = Map<String, dynamic>.from(loc as Map);
+            data['lat'] = m['lat'];
+            data['lng'] = m['lng'];
+          }
+        } catch (_) {
+          // ไม่ได้รับอนุญาต/ยังไม่ตัดสินใจ location permission/timeout — ข้าม ไม่ block metrics round อื่น
+        }
+      } else if (Platform.isWindows) {
+        data = await _collectWindowsMetrics();
+      } else {
+        return;
+      }
+      await NetworkManager.instance.postV3('/v3/api/device/metrics', data);
+    } catch (_) {
+      // วัด/ส่งไม่สำเร็จรอบนี้ (เช่น agent เพิ่งเปิด ยังไม่ auth เสร็จ) — ข้าม รอรอบถัดไป
+    }
+  }
+
+  // Windows: PowerShell (Get-Counter/CIM/System.Windows.Forms) → JSON → parse ใน Dart
+  // ไม่ต้อง delta-sample เองแบบ macOS เพราะ Get-Counter คืน rate/sec ให้ตรงๆ อยู่แล้ว
+  // "Time on AC" ไม่มี API ตรงๆ เหมือนกับฝั่ง macOS — track เอง in-process ด้วย _winAcConnectedSince
+  DateTime? _winAcConnectedSince;
+
+  Future<Map<String, dynamic>> _collectWindowsMetrics() async {
+    const script = r'''
+Add-Type -AssemblyName System.Windows.Forms
+$cpu = Get-Counter '\Processor(_Total)\% User Time','\Processor(_Total)\% Privileged Time','\Processor(_Total)\% Idle Time' -ErrorAction SilentlyContinue
+$cpuUser = 0; $cpuSys = 0; $cpuIdle = 0
+if ($cpu) {
+  foreach ($s in $cpu.CounterSamples) {
+    if ($s.Path -like '*User Time*') { $cpuUser = [math]::Round($s.CookedValue,1) }
+    elseif ($s.Path -like '*Privileged Time*') { $cpuSys = [math]::Round($s.CookedValue,1) }
+    elseif ($s.Path -like '*Idle Time*') { $cpuIdle = [math]::Round($s.CookedValue,1) }
+  }
+}
+$os = Get-CimInstance Win32_OperatingSystem
+$totalMemGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+$freeMemGB = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+$usedMemGB = [math]::Round($totalMemGB - $freeMemGB, 2)
+$cacheSample = Get-Counter '\Memory\Cache Bytes' -ErrorAction SilentlyContinue
+$cachedGB = if ($cacheSample) { [math]::Round($cacheSample.CounterSamples[0].CookedValue / 1GB, 2) } else { 0 }
+$pageFile = Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue
+$swapUsedGB = if ($pageFile) { [math]::Round((($pageFile | Measure-Object -Property CurrentUsage -Sum).Sum) / 1024, 2) } else { 0 }
+
+$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+$diskTotalGB = [math]::Round($disk.Size / 1GB, 2)
+$diskFreeGB = [math]::Round($disk.FreeSpace / 1GB, 2)
+$diskUsedGB = [math]::Round($diskTotalGB - $diskFreeGB, 2)
+
+$net = Get-Counter '\Network Interface(*)\Bytes Received/sec','\Network Interface(*)\Bytes Sent/sec' -ErrorAction SilentlyContinue
+$rxKBs = 0.0; $txKBs = 0.0
+if ($net) {
+  foreach ($s in $net.CounterSamples) {
+    if ($s.InstanceName -notlike '*isatap*' -and $s.InstanceName -notlike '*loopback*') {
+      if ($s.Path -like '*Received*') { $rxKBs += $s.CookedValue / 1024 }
+      elseif ($s.Path -like '*Sent*') { $txKBs += $s.CookedValue / 1024 }
+    }
+  }
+}
+
+# Location (POC) — WiFi-based via WinRT Geolocator (ไม่ใช่ GPS จริง), best-effort:
+# ต้องเปิด Location Services ระดับ Windows (Settings > Privacy > Location) ไม่งั้น task จะ fault
+# แล้ว catch ไปเงียบๆ — เหมือน pattern อื่นที่ Windows ไม่มี API ตรงๆ ให้ documented เป็น gap
+$lat = $null; $lng = $null
+try {
+  Add-Type -AssemblyName System.Runtime.WindowsRuntime
+  [Windows.Devices.Geolocation.Geolocator,Windows.Devices.Geolocation,ContentType=WindowsRuntime] | Out-Null
+  $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+  $geolocator = New-Object Windows.Devices.Geolocation.Geolocator
+  $op = $geolocator.GetGeopositionAsync()
+  $asTaskSpecific = $asTaskGeneric.MakeGenericMethod([Windows.Devices.Geolocation.Geoposition])
+  $task = $asTaskSpecific.Invoke($null, @($op))
+  if ($task.Wait(5000) -and -not $task.IsFaulted) {
+    $pos = $task.Result
+    $lat = [math]::Round($pos.Coordinate.Point.Position.Latitude, 6)
+    $lng = [math]::Round($pos.Coordinate.Point.Position.Longitude, 6)
+  }
+} catch { $lat = $null; $lng = $null }
+
+$power = [System.Windows.Forms.SystemInformation]::PowerStatus
+$hasBattery = -not ([int]$power.BatteryChargeStatus -band 128)   # 128 = NoSystemBattery
+$batteryPct = if ($power.BatteryLifePercent -le 1.0) { [math]::Round($power.BatteryLifePercent * 100, 0) } else { 0 }
+$onAC = $power.PowerLineStatus -eq 'Online'
+$charged = ($batteryPct -ge 99)   # Windows ไม่มี "IsCharged" flag ตรงๆ เหมือน macOS — ใช้ % ใกล้เต็มแทน
+
+# Processes/Threads — Get-Process เข้าถึงได้โดยไม่ต้อง admin (ต่าง macOS ที่ proc_listpids ถูก sandbox บล็อก)
+$procs = Get-Process -ErrorAction SilentlyContinue
+$processCount = if ($procs) { $procs.Count } else { 0 }
+$threadCount = if ($procs) { ($procs | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum } else { 0 }
+
+# Memory breakdown — Windows ไม่มี concept "wired/compressed" แบบ macOS ตรงๆ, ใช้ proxy:
+# Wired ~ kernel non-paged pool (memory ที่ page ออกไม่ได้ ใกล้เคียงความหมาย wired ที่สุด)
+# Compressed ไม่มี counter มาตรฐานให้ query ง่ายๆ บน Windows — รายงาน 0 (documented gap)
+$memPerf = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory -ErrorAction SilentlyContinue
+$wiredGB = if ($memPerf) { [math]::Round($memPerf.PoolNonpagedBytes / 1GB, 2) } else { 0 }
+$compressedGB = 0
+$appGB = [math]::Round([math]::Max(0, $usedMemGB - $wiredGB - $compressedGB), 2)
+
+# Disk IOPS — raw class = cumulative counter (ตั้งแต่ boot), formatted class = rate/sec จริง
+$diskRaw = Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+$diskReadsCount = if ($diskRaw) { $diskRaw.DiskReadsPersec } else { 0 }
+$diskWritesCount = if ($diskRaw) { $diskRaw.DiskWritesPersec } else { 0 }
+$diskDataReadGB = if ($diskRaw) { [math]::Round($diskRaw.DiskReadBytesPersec / 1GB, 2) } else { 0 }
+$diskDataWrittenGB = if ($diskRaw) { [math]::Round($diskRaw.DiskWriteBytesPersec / 1GB, 2) } else { 0 }
+$diskFmt = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+$diskReadsPerSec = if ($diskFmt) { $diskFmt.DiskReadsPersec } else { 0 }
+$diskWritesPerSec = if ($diskFmt) { $diskFmt.DiskWritesPersec } else { 0 }
+$diskReadKBs = if ($diskFmt) { [math]::Round($diskFmt.DiskReadBytesPersec / 1024, 2) } else { 0 }
+$diskWriteKBs = if ($diskFmt) { [math]::Round($diskFmt.DiskWriteBytesPersec / 1024, 2) } else { 0 }
+
+# Network packets/cumulative — เหมือน disk (raw=cumulative, formatted=rate), ข้าม isatap/loopback
+$netRaw = Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -notlike '*isatap*' -and $_.Name -notlike '*Loopback*' }
+$netPacketsIn = if ($netRaw) { ($netRaw | Measure-Object -Property PacketsReceivedPersec -Sum).Sum } else { 0 }
+$netPacketsOut = if ($netRaw) { ($netRaw | Measure-Object -Property PacketsSentPersec -Sum).Sum } else { 0 }
+$netDataReceivedGB = if ($netRaw) { [math]::Round((($netRaw | Measure-Object -Property BytesReceivedPersec -Sum).Sum) / 1GB, 2) } else { 0 }
+$netDataSentGB = if ($netRaw) { [math]::Round((($netRaw | Measure-Object -Property BytesSentPersec -Sum).Sum) / 1GB, 2) } else { 0 }
+$netFmt = Get-Counter '\Network Interface(*)\Packets Received/sec','\Network Interface(*)\Packets Sent/sec' -ErrorAction SilentlyContinue
+$pInSec = 0.0; $pOutSec = 0.0
+if ($netFmt) {
+  foreach ($s in $netFmt.CounterSamples) {
+    if ($s.InstanceName -notlike '*isatap*' -and $s.InstanceName -notlike '*loopback*') {
+      if ($s.Path -like '*Received*') { $pInSec += $s.CookedValue }
+      elseif ($s.Path -like '*Sent*') { $pOutSec += $s.CookedValue }
+    }
+  }
+}
+
+$result = @{
+  cpuUserPct = $cpuUser; cpuSystemPct = $cpuSys; cpuIdlePct = $cpuIdle
+  cpuProcesses = $processCount; cpuThreads = $threadCount
+  memPhysicalGB = $totalMemGB; memUsedGB = $usedMemGB; memCachedGB = $cachedGB; memSwapUsedGB = $swapUsedGB
+  memAppGB = $appGB; memWiredGB = $wiredGB; memCompressedGB = $compressedGB
+  diskFreeGB = $diskFreeGB; diskUsedGB = $diskUsedGB; diskTotalGB = $diskTotalGB
+  diskReadsCount = $diskReadsCount; diskWritesCount = $diskWritesCount
+  diskReadsPerSec = $diskReadsPerSec; diskWritesPerSec = $diskWritesPerSec
+  diskDataReadGB = $diskDataReadGB; diskDataWrittenGB = $diskDataWrittenGB
+  diskReadKBs = $diskReadKBs; diskWriteKBs = $diskWriteKBs
+  netRxKBs = [math]::Round($rxKBs,2); netTxKBs = [math]::Round($txKBs,2)
+  netPacketsIn = $netPacketsIn; netPacketsOut = $netPacketsOut
+  netPacketsInPerSec = [math]::Round($pInSec,2); netPacketsOutPerSec = [math]::Round($pOutSec,2)
+  netDataReceivedGB = $netDataReceivedGB; netDataSentGB = $netDataSentGB
+  hasBattery = $hasBattery; batteryPct = $batteryPct; batteryCharged = $charged; onAC = $onAC
+  energyImpactPct = [math]::Round($cpuSys + $cpuUser, 1)
+}
+if ($lat -ne $null -and $lng -ne $null) { $result.lat = $lat; $result.lng = $lng }
+$result | ConvertTo-Json -Compress
+''';
+    final proc = await Process.run('powershell', _psArgs(script, hidden: true),
+        stdoutEncoding: const SystemEncoding());
+    final out = proc.stdout.toString().trim();
+    final parsed = Map<String, dynamic>.from(jsonDecode(out) as Map);
+    final onAC = parsed.remove('onAC') == true;
+    if (onAC) {
+      _winAcConnectedSince ??= DateTime.now();
+    } else {
+      _winAcConnectedSince = null;
+    }
+    parsed['timeOnACMinutes'] = _winAcConnectedSince == null
+        ? 0.0
+        : DateTime.now().difference(_winAcConnectedSince!).inSeconds / 60.0;
+    return parsed;
   }
 
   // ── Remote Desktop capture loop ───────────────────────────
@@ -501,7 +704,8 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
     // macOS: เริ่ม SCStream (ทำให้ system indicator ผูกกับ session — หยุดแล้ว indicator หายทันที)
     if (Platform.isMacOS) {
       try {
-        await _remoteChannel.invokeMethod('startCapture', {'maxWidth': 1280, 'quality': 0.5});
+        // maxWidth 1920, quality 1.0 (สูงสุด — user ขอตรงๆ "1.00 เลย" หลัง +50% ครั้งแรก, 2026-07-17)
+        await _remoteChannel.invokeMethod('startCapture', {'maxWidth': 1920, 'quality': 1.0});
       } catch (_) {}
     }
     _remoteCaptureTimer = Timer.periodic(_remoteFrameInterval, (_) => _captureAndUpload());
@@ -772,12 +976,13 @@ Add-Type -AssemblyName System.Drawing
   }
 
   // คืน JPEG data URL ของหน้าจอหลัก — macOS ผ่าน native, Windows ผ่าน PowerShell CopyFromScreen
+  // maxWidth 1920, quality 1.0/100 (สูงสุด — user ขอตรงๆ "1.00 เลย" หลัง +50% ครั้งแรก, 2026-07-17)
   Future<String?> _captureScreenFrame() async {
     if (Platform.isMacOS) {
-      return _remoteChannel.invokeMethod<String>('captureScreen', {'maxWidth': 1280, 'quality': 0.5});
+      return _remoteChannel.invokeMethod<String>('captureScreen', {'maxWidth': 1920, 'quality': 1.0});
     }
     if (Platform.isWindows) {
-      // CopyFromScreen → ย่อ maxWidth 1280 → JPEG q=50 → base64 (stdout)
+      // CopyFromScreen → ย่อ maxWidth 1920 → JPEG q=100 → base64 (stdout)
       const script = r'''
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -785,7 +990,7 @@ $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-$maxW = 1280
+$maxW = 1920
 if ($b.Width -gt $maxW) {
   $nw = $maxW; $nh = [int]($b.Height * $maxW / $b.Width)
   $rs = New-Object System.Drawing.Bitmap $nw, $nh
@@ -795,7 +1000,7 @@ if ($b.Width -gt $maxW) {
 }
 $enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
 $ep = New-Object System.Drawing.Imaging.EncoderParameters 1
-$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]50)
+$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]100)
 $ms = New-Object System.IO.MemoryStream
 $bmp.Save($ms, $enc, $ep)
 [Convert]::ToBase64String($ms.ToArray())
