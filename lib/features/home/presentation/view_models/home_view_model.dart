@@ -581,6 +581,12 @@ if ($net) {
 # Location (POC) — WiFi-based via WinRT Geolocator (ไม่ใช่ GPS จริง), best-effort:
 # ต้องเปิด Location Services ระดับ Windows (Settings > Privacy > Location) ไม่งั้น task จะ fault
 # แล้ว catch ไปเงียบๆ — เหมือน pattern อื่นที่ Windows ไม่มี API ตรงๆ ให้ documented เป็น gap
+#
+# ⚠️ ห้ามใช้ $task.Wait() ตรงๆ — deadlock เสมอ (verified บนเครื่องจริง 2026-07-17):
+# PowerShell 5.1 รัน STA เป็นค่า default, AsTask() ของ WinRT IAsyncOperation ต้อง pump
+# message queue ของ thread เดียวกันถึงจะ complete ได้ แต่ .Wait() บล็อก thread นั้นเอง
+# → ติด deadlock จนครบ timeout ทุกครั้ง (ไม่ fault, ไม่ throw — แค่ไม่มีวัน complete)
+# แก้ด้วย poll ผ่าน DoEvents() แทน (ให้ message pump ทำงานต่อระหว่างรอ)
 $lat = $null; $lng = $null
 try {
   Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -590,7 +596,12 @@ try {
   $op = $geolocator.GetGeopositionAsync()
   $asTaskSpecific = $asTaskGeneric.MakeGenericMethod([Windows.Devices.Geolocation.Geoposition])
   $task = $asTaskSpecific.Invoke($null, @($op))
-  if ($task.Wait(5000) -and -not $task.IsFaulted) {
+  $geoDeadline = (Get-Date).AddSeconds(10)
+  while (-not $task.IsCompleted -and (Get-Date) -lt $geoDeadline) {
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 100
+  }
+  if ($task.IsCompleted -and -not $task.IsFaulted) {
     $pos = $task.Result
     $lat = [math]::Round($pos.Coordinate.Point.Position.Latitude, 6)
     $lng = [math]::Round($pos.Coordinate.Point.Position.Longitude, 6)
