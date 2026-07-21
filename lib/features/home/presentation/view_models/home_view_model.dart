@@ -512,12 +512,30 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
     final action = m['action'] as String? ?? 'install';
     final installerUrl = m['installerUrl'] as String? ?? '';
     final installerChecksum = (m['installerChecksum'] as String? ?? '').toLowerCase();
-    if (jobId.isEmpty || installerUrl.isEmpty || installerChecksum.isEmpty) return;
+    final ref = m['ref'] as String? ?? ''; // ชื่อ software (+version) — ใช้ uninstall by name
+    if (jobId.isEmpty) return;
     if (!Platform.isWindows && !Platform.isMacOS) {
       await _reportDeployResult(jobId, 'failed', 'unsupported platform');
       return;
     }
 
+    // uninstall — ไม่ต้องดาวน์โหลด installer; หา uninstall string จาก registry ด้วยชื่อ (ref)
+    if (action == 'uninstall') {
+      if (!Platform.isWindows) {
+        await _reportDeployResult(jobId, 'failed', 'macOS uninstall not supported in this POC');
+        return;
+      }
+      if (ref.isEmpty) {
+        await _reportDeployResult(jobId, 'failed', 'ref (software name) required for uninstall');
+        return;
+      }
+      final (ok, message) = await _uninstallWindowsByName(ref);
+      await _reportDeployResult(jobId, ok ? 'succeeded' : 'failed', message);
+      return;
+    }
+
+    // install — ต้องมี installer + checksum
+    if (installerUrl.isEmpty || installerChecksum.isEmpty) return;
     String? filePath;
     try {
       filePath = await _downloadDeployFile(installerUrl, jobId);
@@ -594,6 +612,47 @@ try {
       final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
       final code = out['code'] as int? ?? -1;
       if (code == 0 || code == 3010) return (true, 'exit code $code');
+      return (false, out['err'] as String? ?? 'exit code $code');
+    } catch (_) {
+      return (false, 'unexpected output: ${proc.stdout}');
+    }
+  }
+
+  // Windows uninstall by name — ค้น UninstallString จาก registry (Uninstall keys ทั้ง 64/32-bit)
+  // ด้วยชื่อ (DisplayName match) แล้วรัน. MSI (msiexec /x {GUID}) เติม /quiet /norestart ให้;
+  // uninstaller อื่น (EXE) รันตรง. ไม่ต้องดาวน์โหลดไฟล์ — ใช้ตัวที่ติดตั้งอยู่แล้วบนเครื่อง.
+  Future<(bool, String)> _uninstallWindowsByName(String name) async {
+    final safeName = name.replaceAll("'", "''").replaceAll('"', '');
+    final script = '''
+\$roots = @(
+  'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+  'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+  'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+)
+\$app = Get-ItemProperty \$roots -ErrorAction SilentlyContinue |
+  Where-Object { \$_.DisplayName -like '*$safeName*' -and \$_.UninstallString } |
+  Select-Object -First 1
+if (-not \$app) { @{ code = -2; err = 'software not found: $safeName' } | ConvertTo-Json -Compress; exit }
+\$u = \$app.UninstallString
+try {
+  if (\$u -match '(?i)msiexec') {
+    \$guid = [regex]::Match(\$u, '\\{[0-9A-Fa-f\\-]+\\}').Value
+    \$p = Start-Process msiexec.exe -ArgumentList @('/x', \$guid, '/quiet', '/norestart') -Verb RunAs -Wait -PassThru
+  } else {
+    \$exe = \$u.Trim('"')
+    \$p = Start-Process cmd.exe -ArgumentList @('/c', \$u, '/S') -Verb RunAs -Wait -PassThru
+  }
+  @{ code = \$p.ExitCode; name = \$app.DisplayName } | ConvertTo-Json -Compress
+} catch {
+  @{ code = -1; err = \$_.Exception.Message } | ConvertTo-Json -Compress
+}
+''';
+    final proc = await Process.run('powershell', _psArgs(script, hidden: true),
+        stdoutEncoding: const SystemEncoding());
+    try {
+      final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
+      final code = out['code'] as int? ?? -1;
+      if (code == 0 || code == 3010) return (true, 'uninstalled ${out['name'] ?? name} (exit $code)');
       return (false, out['err'] as String? ?? 'exit code $code');
     } catch (_) {
       return (false, 'unexpected output: ${proc.stdout}');
