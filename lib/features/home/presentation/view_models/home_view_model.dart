@@ -642,10 +642,12 @@ try {
     \$guid = [regex]::Match(\$u, '\\{[0-9A-Fa-f\\-]+\\}').Value
     \$p = Start-Process msiexec.exe -ArgumentList @('/x', \$guid, '/quiet', '/norestart') -Verb RunAs -Wait -PassThru
   } else {
+    # EXE/NSIS uninstaller (เช่น 7-Zip Uninstall.exe) — เรียก exe ตรงผ่าน -FilePath กันพาธมีช่องว่าง
+    # (เดิม cmd /c \$u /S แตกที่ช่องว่างใน 'C:\\Program Files\\...') + /S = silent (NSIS)
     \$exe = \$u.Trim('"')
-    \$p = Start-Process cmd.exe -ArgumentList @('/c', \$u, '/S') -Verb RunAs -Wait -PassThru
+    \$p = Start-Process -FilePath \$exe -ArgumentList '/S' -Verb RunAs -Wait -PassThru
   }
-  @{ code = \$p.ExitCode; name = \$app.DisplayName } | ConvertTo-Json -Compress
+  @{ code = \$p.ExitCode; name = \$app.DisplayName; us = \$u } | ConvertTo-Json -Compress
 } catch {
   @{ code = -1; err = \$_.Exception.Message } | ConvertTo-Json -Compress
 }
@@ -657,7 +659,8 @@ try {
       final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
       final code = out['code'] as int? ?? -1;
       if (code == 0 || code == 3010) return (true, 'uninstalled ${out['name'] ?? name} (exit $code)');
-      return (false, out['err'] as String? ?? 'exit code $code');
+      final us = out['us'] != null ? ' [${out['us']}]' : '';
+      return (false, (out['err'] as String? ?? 'exit code $code') + us);
     } catch (_) {
       return (false, 'unexpected output: ${proc.stdout}');
     }
