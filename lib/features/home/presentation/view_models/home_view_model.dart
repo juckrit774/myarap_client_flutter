@@ -594,7 +594,10 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
   }
 
   // Windows: msiexec /i (install) หรือ /x (uninstall) ผ่าน Start-Process -Verb RunAs (บังคับ
-  // UAC prompt ทุกครั้ง) — capture exit code จริงผ่าน stdout JSON (0/3010 = success, อื่นๆ = fail)
+  // UAC prompt ทุกครั้ง) — capture exit code จริงผ่าน stdout JSON (0/3010 = success, อื่นๆ = fail).
+  // ⚠️ ห้ามใช้ -WindowStyle Hidden ที่นี่: parent PowerShell ที่ hidden ทำให้ UAC prompt ของ
+  // -Verb RunAs เด้งบน secure-desktop โดยไม่มี owner window ให้ focus → กดไม่ได้ → -Wait ค้าง
+  // (เจอจริงตอน uninstall 7-Zip 2026-07-21). ปล่อยให้ window โผล่เพื่อให้ user กด UAC ได้.
   Future<(bool, String)> _runWindowsDeploy(String filePath, String action) async {
     final verb = action == 'uninstall' ? '/x' : '/i';
     final safePath = filePath.replaceAll("'", "''");
@@ -606,7 +609,7 @@ try {
   @{ code = -1; err = \$_.Exception.Message } | ConvertTo-Json -Compress
 }
 ''';
-    final proc = await Process.run('powershell', _psArgs(script, hidden: true),
+    final proc = await Process.run('powershell', _psArgs(script),
         stdoutEncoding: const SystemEncoding());
     try {
       final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
@@ -647,7 +650,8 @@ try {
   @{ code = -1; err = \$_.Exception.Message } | ConvertTo-Json -Compress
 }
 ''';
-    final proc = await Process.run('powershell', _psArgs(script, hidden: true),
+    // ไม่ hidden — ต้องให้ UAC prompt ของ -Verb RunAs กดได้ (ดูหมายเหตุใน _runWindowsDeploy)
+    final proc = await Process.run('powershell', _psArgs(script),
         stdoutEncoding: const SystemEncoding());
     try {
       final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
