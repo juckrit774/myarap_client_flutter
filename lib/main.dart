@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show AppExitResponse; // ตัว enum ตอบ didRequestAppExit (มาจาก engine ไม่ได้ re-export ผ่าน material)
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'core/config/app_colors.dart';
@@ -33,15 +34,88 @@ class MyarapApp extends StatefulWidget {
   State<MyarapApp> createState() => _MyarapAppState();
 }
 
-class _MyarapAppState extends State<MyarapApp> {
+class _MyarapAppState extends State<MyarapApp> with WidgetsBindingObserver {
   static const _windowChannel = MethodChannel('com.myarap/window');
 
   @override
   void initState() {
     super.initState();
+    // POC: ดักตอนแอปจะปิด (คลิก X บน Windows / Quit menu+⌘Q บน macOS) → ขอรหัส admin ก่อน
+    WidgetsBinding.instance.addObserver(this);
     if (Platform.isMacOS) {
       _windowChannel.setMethodCallHandler(_handleWindowCall);
     }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // ถูกเรียกเมื่อ OS ขอปิดแอป (window close/quit) — ปิดจริงเฉพาะเมื่อใส่รหัส admin ถูก
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    final ok = await _promptAdminPassword();
+    return ok ? AppExitResponse.exit : AppExitResponse.cancel;
+  }
+
+  Future<bool> _promptAdminPassword() async {
+    final ctx = _navigatorKey.currentContext;
+    if (ctx == null) return false; // ไม่มี UI ให้ถาม → ไม่ปิด (ปลอดภัยไว้ก่อน)
+    final controller = TextEditingController();
+    final result = await showDialog<bool>(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (dctx) {
+        var wrong = false;
+        return StatefulBuilder(
+          builder: (dctx, setLocal) {
+            void submit() {
+              if (controller.text == AppConfig.adminClosePassword) {
+                Navigator.of(dctx).pop(true);
+              } else {
+                setLocal(() => wrong = true);
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('ปิดโปรแกรม MYARAP'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('กรุณาใส่รหัสผ่านผู้ดูแลระบบเพื่อปิดโปรแกรม'),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    obscureText: true,
+                    autofocus: true,
+                    onSubmitted: (_) => submit(),
+                    decoration: InputDecoration(
+                      labelText: 'รหัสผ่าน admin',
+                      errorText: wrong ? 'รหัสผ่านไม่ถูกต้อง' : null,
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dctx).pop(false),
+                  child: const Text('ยกเลิก'),
+                ),
+                FilledButton(
+                  onPressed: submit,
+                  child: const Text('ปิดโปรแกรม'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    return result ?? false;
   }
 
   Future<void> _handleWindowCall(MethodCall call) async {

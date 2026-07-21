@@ -73,7 +73,9 @@ class AppDelegate: FlutterAppDelegate {
 
     menu.addItem(.separator())
 
-    menu.addItem(NSMenuItem(title: "Quit MYARAP", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    // POC: ไม่ terminate ตรงๆ — show window ก่อน แล้วค่อย terminate เพื่อให้ Flutter password dialog
+    // (didRequestAppExit) โผล่บนหน้าต่างที่มองเห็น (ตอน quit จาก tray หน้าต่างมักถูกซ่อนอยู่)
+    menu.addItem(NSMenuItem(title: "Quit MYARAP", action: #selector(requestQuit), keyEquivalent: "q"))
 
     AppDelegate.statusItem.menu = menu
   }
@@ -82,6 +84,15 @@ class AppDelegate: FlutterAppDelegate {
     NSApp.setActivationPolicy(.regular)
     NSApp.windows.first?.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
+  }
+
+  // POC: quit ต้องผ่าน password gate — เปิดหน้าต่างให้เห็นก่อน แล้ว terminate จะไป trigger
+  // applicationShouldTerminate → Flutter didRequestAppExit (ถามรหัส admin) → ปิดจริงเฉพาะเมื่อรหัสถูก
+  @objc private func requestQuit() {
+    showMainWindow()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+      NSApp.terminate(nil)
+    }
   }
 
   @objc private func openSetting() {
