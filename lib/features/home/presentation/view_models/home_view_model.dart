@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:dio/dio.dart' as dio_pkg;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -491,6 +493,127 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
         // viewer เปิด Asset Detail → ขอวัดค่าตอนนี้เลย (Activity Monitor card, live pull)
         _collectAndSendMetrics();
         break;
+      case 'deploy':
+        // Part B (Deploy Job) — สั่ง install/uninstall software/patch จริงบนเครื่องนี้
+        _handleDeployEvent(m);
+        break;
+    }
+  }
+
+  // ── Deploy Job (Part B) — install/uninstall software/patch จริง ──────────
+  //
+  // blast radius สูงสุดในระบบ (RCE โดยนิยาม) — verify checksum ก่อนรันเสมอ ไม่มีทาง skip,
+  // report ผลกลับ backend ทุกครั้งไม่ว่าสำเร็จ/ล้มเหลว. privilege model (POC): prompt ผู้ใช้ที่
+  // เครื่องทุกครั้ง (UAC บน Windows ผ่าน -Verb RunAs, "with administrator privileges" บน macOS)
+  // — agent เองไม่ได้รัน elevated ถาวร ไม่มี fallback เงียบๆ ถ้า user ปฏิเสธ prompt = fail ตรงๆ
+
+  Future<void> _handleDeployEvent(Map<String, dynamic> m) async {
+    final jobId = m['jobId'] as String? ?? '';
+    final action = m['action'] as String? ?? 'install';
+    final installerUrl = m['installerUrl'] as String? ?? '';
+    final installerChecksum = (m['installerChecksum'] as String? ?? '').toLowerCase();
+    if (jobId.isEmpty || installerUrl.isEmpty || installerChecksum.isEmpty) return;
+    if (!Platform.isWindows && !Platform.isMacOS) {
+      await _reportDeployResult(jobId, 'failed', 'unsupported platform');
+      return;
+    }
+
+    String? filePath;
+    try {
+      filePath = await _downloadDeployFile(installerUrl, jobId);
+      if (filePath == null) {
+        await _reportDeployResult(jobId, 'failed', 'download failed');
+        return;
+      }
+      final actualChecksum = await _sha256OfFile(filePath);
+      if (actualChecksum != installerChecksum) {
+        await _reportDeployResult(jobId, 'failed', 'checksum mismatch');
+        return;
+      }
+      final (ok, message) = Platform.isWindows
+          ? await _runWindowsDeploy(filePath, action)
+          : await _runMacDeploy(filePath, action);
+      await _reportDeployResult(jobId, ok ? 'succeeded' : 'failed', message);
+    } catch (e) {
+      await _reportDeployResult(jobId, 'failed', e.toString());
+    } finally {
+      if (filePath != null) {
+        try {
+          await File(filePath).delete();
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<void> _reportDeployResult(String jobId, String status, String message) async {
+    try {
+      await NetworkManager.instance.postV3(
+          '/v3/api/device/deploy-result', {'jobId': jobId, 'status': status, 'message': message});
+    } catch (_) {}
+  }
+
+  Future<String?> _downloadDeployFile(String url, String jobId) async {
+    try {
+      final defaultExt = Platform.isWindows ? '.msi' : '.pkg';
+      final uri = Uri.tryParse(url);
+      final path = uri?.path ?? '';
+      final ext = path.contains('.') ? path.substring(path.lastIndexOf('.')) : defaultExt;
+      final savePath = '${Directory.systemTemp.path}${Platform.pathSeparator}myarap_deploy_$jobId$ext';
+      final downloader = dio_pkg.Dio(dio_pkg.BaseOptions(
+        connectTimeout: const Duration(seconds: 30),
+        receiveTimeout: const Duration(minutes: 5),
+      ));
+      await downloader.download(url, savePath);
+      return savePath;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String> _sha256OfFile(String path) async {
+    final bytes = await File(path).readAsBytes();
+    return sha256.convert(bytes).toString();
+  }
+
+  // Windows: msiexec /i (install) หรือ /x (uninstall) ผ่าน Start-Process -Verb RunAs (บังคับ
+  // UAC prompt ทุกครั้ง) — capture exit code จริงผ่าน stdout JSON (0/3010 = success, อื่นๆ = fail)
+  Future<(bool, String)> _runWindowsDeploy(String filePath, String action) async {
+    final verb = action == 'uninstall' ? '/x' : '/i';
+    final safePath = filePath.replaceAll("'", "''");
+    final script = '''
+try {
+  \$p = Start-Process -FilePath msiexec.exe -ArgumentList @('$verb', '$safePath', '/quiet', '/norestart') -Verb RunAs -Wait -PassThru
+  @{ code = \$p.ExitCode } | ConvertTo-Json -Compress
+} catch {
+  @{ code = -1; err = \$_.Exception.Message } | ConvertTo-Json -Compress
+}
+''';
+    final proc = await Process.run('powershell', _psArgs(script, hidden: true),
+        stdoutEncoding: const SystemEncoding());
+    try {
+      final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
+      final code = out['code'] as int? ?? -1;
+      if (code == 0 || code == 3010) return (true, 'exit code $code');
+      return (false, out['err'] as String? ?? 'exit code $code');
+    } catch (_) {
+      return (false, 'unexpected output: ${proc.stdout}');
+    }
+  }
+
+  // macOS: รองรับแค่ install (.pkg ผ่าน installer -pkg) — uninstall ไม่มี mechanism มาตรฐาน
+  // เหมือน Windows MSI (ต้องมี uninstaller เฉพาะของแต่ละ vendor) จึงไม่รองรับใน POC นี้
+  Future<(bool, String)> _runMacDeploy(String filePath, String action) async {
+    if (action == 'uninstall') {
+      return (false, 'macOS uninstall not supported in this POC');
+    }
+    try {
+      final script =
+          'do shell script "installer -pkg " & quoted form of "$filePath" & " -target /" with administrator privileges';
+      final proc = await Process.run('osascript', ['-e', script]);
+      if (proc.exitCode == 0) return (true, 'installed');
+      return (false, proc.stderr.toString().trim());
+    } catch (e) {
+      return (false, e.toString());
     }
   }
 

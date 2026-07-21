@@ -250,15 +250,27 @@ class MacDeviceInfo {
       let entries = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [],
                                                   options: [.skipsPackageDescendants, .skipsSubdirectoryDescendants])) ?? []
       for url in entries where url.pathExtension == "app" {
-        guard fm.isExecutableFile(atPath: url.path), let mdi = NSMetadataItem(url: url) else { continue }
-        let name = mdi.value(forAttribute: kMDItemDisplayName as String) as? String ?? url.deletingPathExtension().lastPathComponent
-        guard !name.isEmpty, !seen.contains(name) else { continue }
+        guard fm.isExecutableFile(atPath: url.path) else { continue }
+        // Spotlight metadata (เร็ว) — แต่ถ้า app ไม่ถูก index (เช่น Microsoft Office บางเครื่อง)
+        // NSMetadataItem จะเป็น nil → ต้อง fallback อ่าน Info.plist ตรงๆ ไม่งั้น app หายไปทั้งตัว
+        let mdi = NSMetadataItem(url: url)
+        var name = mdi?.value(forAttribute: kMDItemDisplayName as String) as? String ?? ""
+        var version = mdi?.value(forAttribute: kMDItemVersion as String) as? String ?? ""
+        let size = mdi?.value(forAttribute: kMDItemFSSize as String) as? Int ?? 0
+        if name.isEmpty || version.isEmpty {
+          if let plist = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist")) {
+            if name.isEmpty {
+              name = (plist["CFBundleDisplayName"] as? String) ?? (plist["CFBundleName"] as? String) ?? ""
+            }
+            if version.isEmpty {
+              version = (plist["CFBundleShortVersionString"] as? String) ?? (plist["CFBundleVersion"] as? String) ?? ""
+            }
+          }
+        }
+        if name.isEmpty { name = url.deletingPathExtension().lastPathComponent }
+        guard !seen.contains(name) else { continue }
         seen.insert(name)
-        result.append([
-          "name": name,
-          "version": mdi.value(forAttribute: kMDItemVersion as String) as? String ?? "",
-          "size": mdi.value(forAttribute: kMDItemFSSize as String) as? Int ?? 0
-        ])
+        result.append(["name": name, "version": version, "size": size])
       }
     }
     return result
