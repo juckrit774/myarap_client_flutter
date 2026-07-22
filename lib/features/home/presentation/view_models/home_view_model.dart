@@ -52,6 +52,7 @@ class HomeViewModel extends ChangeNotifier {
   StreamSubscription? _remoteEventSub;
   Timer? _remoteCaptureTimer;
   bool _remoteCapturing = false;
+  bool _remoteConsentPending = false; // consent dialog กำลังเปิดอยู่ — กัน remote_start ซ้ำเด้ง popup ซ้อน
   String _remoteSessionId = ''; // session ที่กำลัง active (ใช้ตอนผู้ใช้กด Disconnect เอง)
   Process? _winIndicatorProc;   // Windows: process ของ topmost banner form (kill ตอน stop)
   bool _winIndicatorStopByUs = false; // true = เรา kill เอง (normal stop); false = user กดปุ่มหยุด
@@ -892,7 +893,16 @@ $result | ConvertTo-Json -Compress
   Future<void> _onRemoteStart(String sessionId, String viewer) async {
     if (!Platform.isMacOS && !Platform.isWindows) return;
     if (_remoteCaptureTimer != null) return; // มี session active อยู่แล้ว
-    final accept = await _requestRemoteConsent(viewer);
+    // กัน consent popup ซ้ำ: ถ้ากำลังถาม consent ค้างอยู่ (ยังไม่กดตอบ) แล้ว backend push
+    // remote_start ซ้ำ (replay ตอน stream reconnect / session ค้าง) — ไม่เด้ง dialog อันที่สอง
+    if (_remoteConsentPending) return;
+    _remoteConsentPending = true;
+    final bool accept;
+    try {
+      accept = await _requestRemoteConsent(viewer);
+    } finally {
+      _remoteConsentPending = false;
+    }
     // แจ้งผลกลับ backend เสมอ (ทั้ง accept/deny) — viewer จะได้เห็นสถานะถูกต้อง
     try {
       await NetworkManager.instance.postV3(
