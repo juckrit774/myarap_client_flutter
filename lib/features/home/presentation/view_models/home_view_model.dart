@@ -622,9 +622,9 @@ try {
     }
   }
 
-  // Windows uninstall by name — ค้น UninstallString จาก registry (Uninstall keys ทั้ง 64/32-bit)
-  // ด้วยชื่อ (DisplayName match) แล้วรัน. MSI (msiexec /x {GUID}) เติม /quiet /norestart ให้;
-  // uninstaller อื่น (EXE) รันตรง. ไม่ต้องดาวน์โหลดไฟล์ — ใช้ตัวที่ติดตั้งอยู่แล้วบนเครื่อง.
+  // Windows uninstall by name — ค้น (Quiet)UninstallString จาก registry (Uninstall keys 64/32-bit)
+  // ด้วยชื่อ (DisplayName match). MSI → msiexec /x {GUID} /quiet; EXE → แยก exe+args แล้วรัน
+  // (prefer QuietUninstallString ถ้ามี). ไม่ต้องดาวน์โหลด — ใช้ตัว uninstaller ที่ติดตั้งอยู่บนเครื่อง.
   Future<(bool, String)> _uninstallWindowsByName(String name) async {
     final safeName = name.replaceAll("'", "''").replaceAll('"', '');
     final script = '''
@@ -637,20 +637,33 @@ try {
   Where-Object { \$_.DisplayName -like '*$safeName*' -and \$_.UninstallString } |
   Select-Object -First 1
 if (-not \$app) { @{ code = -2; err = 'software not found: $safeName' } | ConvertTo-Json -Compress; exit }
+\$q = \$app.QuietUninstallString
 \$u = \$app.UninstallString
+# prefer QuietUninstallString (คำสั่ง silent ที่ vendor เตรียมมา args ถูกต้อง) ถ้ามี ไม่งั้นใช้ UninstallString
+\$cmd = if (\$q) { \$q } else { \$u }
 try {
-  if (\$u -match '(?i)msiexec') {
-    \$guid = [regex]::Match(\$u, '\\{[0-9A-Fa-f\\-]+\\}').Value
+  if (\$cmd -match '(?i)msiexec') {
+    # MSI: บังคับ /x + quiet (ไม่ว่า registry จะเป็น /I หรือ /X)
+    \$guid = [regex]::Match(\$cmd, '\\{[0-9A-Fa-f\\-]+\\}').Value
     \$p = Start-Process msiexec.exe -ArgumentList @('/x', \$guid, '/quiet', '/norestart') -Verb RunAs -Wait -PassThru
   } else {
-    # EXE/NSIS uninstaller (เช่น 7-Zip Uninstall.exe) — เรียก exe ตรงผ่าน -FilePath กันพาธมีช่องว่าง
-    # (เดิม cmd /c \$u /S แตกที่ช่องว่างใน 'C:\\Program Files\\...') + /S = silent (NSIS)
-    \$exe = \$u.Trim('"')
-    \$p = Start-Process -FilePath \$exe -ArgumentList '/S' -Verb RunAs -Wait -PassThru
+    # EXE uninstaller — UninstallString อาจเป็น "C:\\path with space\\setup.exe" /uninstall
+    # ต้องแยก exe (ในเครื่องหมายคำพูด) ออกจาก arguments ที่ฝังมา ไม่งั้น Trim('"') เดิมทำ path พัง
+    if (\$cmd -match '^\\s*"([^"]+)"\\s*(.*)\$') { \$exe = \$matches[1]; \$rest = \$matches[2].Trim() }
+    elseif (\$cmd -match '^\\s*(\\S+)\\s*(.*)\$') { \$exe = \$matches[1]; \$rest = \$matches[2].Trim() }
+    else { \$exe = \$cmd; \$rest = '' }
+    \$al = @()
+    if (\$rest) { \$al += \$rest }         # args เดิมจาก UninstallString (เช่น /uninstall)
+    if (-not \$q) { \$al += '/S' }         # UninstallString ธรรมดา (ไม่ silent) → ลอง /S (NSIS) เป็น best-effort
+    if (\$al.Count -gt 0) {
+      \$p = Start-Process -FilePath \$exe -ArgumentList \$al -Verb RunAs -Wait -PassThru
+    } else {
+      \$p = Start-Process -FilePath \$exe -Verb RunAs -Wait -PassThru
+    }
   }
-  @{ code = \$p.ExitCode; name = \$app.DisplayName; us = \$u } | ConvertTo-Json -Compress
+  @{ code = \$p.ExitCode; name = \$app.DisplayName; us = \$cmd } | ConvertTo-Json -Compress
 } catch {
-  @{ code = -1; err = \$_.Exception.Message } | ConvertTo-Json -Compress
+  @{ code = -1; err = \$_.Exception.Message; us = \$cmd } | ConvertTo-Json -Compress
 }
 ''';
     // ไม่ hidden — ต้องให้ UAC prompt ของ -Verb RunAs กดได้ (ดูหมายเหตุใน _runWindowsDeploy)
