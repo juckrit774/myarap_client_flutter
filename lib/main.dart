@@ -1,7 +1,8 @@
 import 'dart:io';
-import 'dart:ui' show AppExitResponse; // ตัว enum ตอบ didRequestAppExit (มาจาก engine ไม่ได้ re-export ผ่าน material)
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:window_manager/window_manager.dart';
+import 'package:tray_manager/tray_manager.dart';
 import 'core/config/app_colors.dart';
 import 'core/config/app_config.dart';
 import 'core/services/network_manager.dart';
@@ -15,6 +16,14 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await NetworkManager.instance.updateBaseUrl();
 
+  // Windows: กด X → ย่อลง system tray (mini bar) แทนปิดโปรแกรม (agent ต้องรันต่อเนื่อง)
+  // macOS มี behavior นี้อยู่แล้วผ่าน NSStatusBar + custom close() ใน MainFlutterWindow.swift
+  if (Platform.isWindows) {
+    await windowManager.ensureInitialized();
+    await windowManager.setPreventClose(true); // ดัก close (ปุ่ม X) เพื่อ hide แทน quit
+    await _setupTray();
+  }
+
   NetworkManager.onUnauthorized = () {
     CacheManager.clear().then((_) {
       _navigatorKey.currentState?.pushAndRemoveUntil(
@@ -27,6 +36,17 @@ void main() async {
   runApp(const MyarapApp());
 }
 
+// Windows system-tray (mini bar): ไอคอน + เมนู Show / Quit
+Future<void> _setupTray() async {
+  await trayManager.setIcon('assets/tray_icon.ico');
+  await trayManager.setToolTip(AppConfig.appName);
+  await trayManager.setContextMenu(Menu(items: [
+    MenuItem(key: 'show', label: 'Show ${AppConfig.appName}'),
+    MenuItem.separator(),
+    MenuItem(key: 'exit', label: 'Quit ${AppConfig.appName}'),
+  ]));
+}
+
 class MyarapApp extends StatefulWidget {
   const MyarapApp({super.key});
 
@@ -34,14 +54,16 @@ class MyarapApp extends StatefulWidget {
   State<MyarapApp> createState() => _MyarapAppState();
 }
 
-class _MyarapAppState extends State<MyarapApp> with WidgetsBindingObserver {
+class _MyarapAppState extends State<MyarapApp> with WindowListener, TrayListener {
   static const _windowChannel = MethodChannel('com.myarap/window');
 
   @override
   void initState() {
     super.initState();
-    // POC: ดักตอนแอปจะปิด (คลิก X บน Windows / Quit menu+⌘Q บน macOS) → ขอรหัส admin ก่อน
-    WidgetsBinding.instance.addObserver(this);
+    if (Platform.isWindows) {
+      windowManager.addListener(this); // ดัก onWindowClose (ปุ่ม X)
+      trayManager.addListener(this); // ดักคลิก tray icon/เมนู
+    }
     if (Platform.isMacOS) {
       _windowChannel.setMethodCallHandler(_handleWindowCall);
     }
@@ -49,73 +71,46 @@ class _MyarapAppState extends State<MyarapApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
+    if (Platform.isWindows) {
+      windowManager.removeListener(this);
+      trayManager.removeListener(this);
+    }
     super.dispose();
   }
 
-  // ถูกเรียกเมื่อ OS ขอปิดแอป (window close/quit) — ปิดจริงเฉพาะเมื่อใส่รหัส admin ถูก
+  // Windows: กดปุ่ม X (setPreventClose=true จึงไม่ปิด) → ซ่อนหน้าต่างลง tray
   @override
-  Future<AppExitResponse> didRequestAppExit() async {
-    final ok = await _promptAdminPassword();
-    return ok ? AppExitResponse.exit : AppExitResponse.cancel;
+  void onWindowClose() async {
+    await windowManager.hide();
   }
 
-  Future<bool> _promptAdminPassword() async {
-    final ctx = _navigatorKey.currentContext;
-    if (ctx == null) return false; // ไม่มี UI ให้ถาม → ไม่ปิด (ปลอดภัยไว้ก่อน)
-    final controller = TextEditingController();
-    final result = await showDialog<bool>(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (dctx) {
-        var wrong = false;
-        return StatefulBuilder(
-          builder: (dctx, setLocal) {
-            void submit() {
-              if (controller.text == AppConfig.adminClosePassword) {
-                Navigator.of(dctx).pop(true);
-              } else {
-                setLocal(() => wrong = true);
-              }
-            }
+  // Windows: คลิกซ้ายที่ tray icon → เรียกหน้าต่างกลับมา
+  @override
+  void onTrayIconMouseDown() {
+    windowManager.show();
+    windowManager.focus();
+  }
 
-            return AlertDialog(
-              title: const Text('ปิดโปรแกรม MYARAP'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('กรุณาใส่รหัสผ่านผู้ดูแลระบบเพื่อปิดโปรแกรม'),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: controller,
-                    obscureText: true,
-                    autofocus: true,
-                    onSubmitted: (_) => submit(),
-                    decoration: InputDecoration(
-                      labelText: 'รหัสผ่าน admin',
-                      errorText: wrong ? 'รหัสผ่านไม่ถูกต้อง' : null,
-                      border: const OutlineInputBorder(),
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dctx).pop(false),
-                  child: const Text('ยกเลิก'),
-                ),
-                FilledButton(
-                  onPressed: submit,
-                  child: const Text('ปิดโปรแกรม'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-    return result ?? false;
+  // Windows: คลิกขวาที่ tray icon → เปิด context menu (Show / Quit)
+  @override
+  void onTrayIconRightMouseDown() {
+    trayManager.popUpContextMenu();
+  }
+
+  @override
+  void onTrayMenuItemClick(MenuItem menuItem) async {
+    switch (menuItem.key) {
+      case 'show':
+        await windowManager.show();
+        await windowManager.focus();
+        break;
+      case 'exit':
+        // ปิดจริง: ปลด preventClose ก่อน แล้ว destroy หน้าต่าง + ลบ tray icon
+        await trayManager.destroy();
+        await windowManager.setPreventClose(false);
+        await windowManager.destroy();
+        break;
+    }
   }
 
   Future<void> _handleWindowCall(MethodCall call) async {
