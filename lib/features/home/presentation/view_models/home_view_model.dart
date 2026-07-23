@@ -600,9 +600,23 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
   // -Verb RunAs เด้งบน secure-desktop โดยไม่มี owner window ให้ focus → กดไม่ได้ → -Wait ค้าง
   // (เจอจริงตอน uninstall 7-Zip 2026-07-21). ปล่อยให้ window โผล่เพื่อให้ user กด UAC ได้.
   Future<(bool, String)> _runWindowsDeploy(String filePath, String action) async {
-    final verb = action == 'uninstall' ? '/x' : '/i';
     final safePath = filePath.replaceAll("'", "''");
-    final script = '''
+    // Windows patch (.msu) ใช้ wusa.exe — msiexec ติดตั้ง .msu ไม่ได้ (คนละ installer)
+    // uninstall .msu ต้องระบุ KB number ไม่ใช่ไฟล์ → รองรับแค่ install patch
+    final isMsu = filePath.toLowerCase().endsWith('.msu');
+    String script;
+    if (isMsu) {
+      script = '''
+try {
+  \$p = Start-Process -FilePath wusa.exe -ArgumentList @('$safePath', '/quiet', '/norestart') -Verb RunAs -Wait -PassThru
+  @{ code = \$p.ExitCode } | ConvertTo-Json -Compress
+} catch {
+  @{ code = -1; err = \$_.Exception.Message } | ConvertTo-Json -Compress
+}
+''';
+    } else {
+      final verb = action == 'uninstall' ? '/x' : '/i';
+      script = '''
 try {
   \$p = Start-Process -FilePath msiexec.exe -ArgumentList @('$verb', '$safePath', '/quiet', '/norestart') -Verb RunAs -Wait -PassThru
   @{ code = \$p.ExitCode } | ConvertTo-Json -Compress
@@ -610,11 +624,20 @@ try {
   @{ code = -1; err = \$_.Exception.Message } | ConvertTo-Json -Compress
 }
 ''';
+    }
     final proc = await Process.run('powershell', _psArgs(script),
         stdoutEncoding: const SystemEncoding());
     try {
       final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
       final code = out['code'] as int? ?? -1;
+      if (isMsu) {
+        // wusa exit codes ต่างจาก msiexec: 0=success, 3010=success ต้อง reboot,
+        // 2359302 (0x240006)=patch ติดตั้งอยู่แล้ว, 2359303=ไม่ applicable กับ OS นี้
+        if (code == 0 || code == 3010) return (true, 'patch installed (exit $code)');
+        if (code == 2359302) return (true, 'patch already installed');
+        if (code == 2359303) return (false, 'patch not applicable to this OS');
+        return (false, out['err'] as String? ?? 'wusa exit code $code');
+      }
       if (code == 0 || code == 3010) return (true, 'exit code $code');
       return (false, out['err'] as String? ?? 'exit code $code');
     } catch (_) {
