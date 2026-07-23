@@ -724,19 +724,69 @@ try {
             final m = Map<String, dynamic>.from(loc as Map);
             data['lat'] = m['lat'];
             data['lng'] = m['lng'];
+            data['geoSource'] = 'wifi'; // CoreLocation (WiFi-based) — แม่นกว่า IP
           }
         } catch (_) {
           // ไม่ได้รับอนุญาต/ยังไม่ตัดสินใจ location permission/timeout — ข้าม ไม่ block metrics round อื่น
         }
       } else if (Platform.isWindows) {
         data = await _collectWindowsMetrics();
+        if (data['lat'] != null && data['lng'] != null) {
+          data['geoSource'] = 'wifi'; // WinRT Geolocator สำเร็จ
+        }
       } else {
         return;
+      }
+      // IP-based geo fallback — ถ้า native geo คืน null (Location Services ปิด / WinRT unpackaged null)
+      // ตำแหน่งระดับเมือง/ISP (public IP) พอสำหรับ approximate location; ทำงานทุกเครื่องไม่ต้องขอ permission
+      if (data['lat'] == null || data['lng'] == null) {
+        final ip = await _ipBasedGeo();
+        if (ip != null) {
+          data['lat'] = ip['lat'];
+          data['lng'] = ip['lng'];
+          data['geoSource'] = 'ip'; // ตำแหน่งหยาบ (public IP) — approximate
+        }
       }
       await NetworkManager.instance.postV3('/v3/api/device/metrics', data);
     } catch (_) {
       // วัด/ส่งไม่สำเร็จรอบนี้ (เช่น agent เพิ่งเปิด ยังไม่ auth เสร็จ) — ข้าม รอรอบถัดไป
     }
+  }
+
+  // IP-based geolocation fallback — query จาก public IP (ipinfo.io, ฟรี ไม่ต้อง key)
+  // ตำแหน่ง = public IP ของเครื่อง (office/ISP gateway) → ระดับเมือง ไม่ใช่ตำแหน่งจริงของเครื่อง
+  // ใช้เมื่อ native geo (CoreLocation/WinRT) คืน null — ทำงานทุกเครื่องไม่ต้องขอ Location permission
+  // cache ผลไว้ 1 ชม. (IP ไม่เปลี่ยนบ่อย) กันยิง API ทุก 5 นาที
+  Map<String, dynamic>? _ipGeoCache;
+  DateTime? _ipGeoCachedAt;
+  Future<Map<String, dynamic>?> _ipBasedGeo() async {
+    // ใช้ cache ถ้ายังไม่เกิน 1 ชม.
+    if (_ipGeoCache != null && _ipGeoCachedAt != null &&
+        DateTime.now().difference(_ipGeoCachedAt!) < const Duration(hours: 1)) {
+      return _ipGeoCache;
+    }
+    try {
+      final d = dio_pkg.Dio(dio_pkg.BaseOptions(
+        connectTimeout: const Duration(seconds: 5),
+        receiveTimeout: const Duration(seconds: 5),
+      ));
+      final resp = await d.get('https://ipinfo.io/json');
+      // ipinfo.io คืน loc: "13.7563,100.5018" (lat,lng)
+      final loc = (resp.data is Map ? resp.data['loc'] : null) as String?;
+      if (loc != null && loc.contains(',')) {
+        final parts = loc.split(',');
+        final lat = double.tryParse(parts[0]);
+        final lng = double.tryParse(parts[1]);
+        if (lat != null && lng != null) {
+          _ipGeoCache = {'lat': lat, 'lng': lng};
+          _ipGeoCachedAt = DateTime.now();
+          return _ipGeoCache;
+        }
+      }
+    } catch (_) {
+      // เน็ตล่ม / API block / parse fail — ข้าม (geo optional)
+    }
+    return null;
   }
 
   // Windows: PowerShell (Get-Counter/CIM/System.Windows.Forms) → JSON → parse ใน Dart
