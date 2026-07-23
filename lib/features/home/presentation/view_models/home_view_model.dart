@@ -631,11 +631,14 @@ try {
       final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
       final code = out['code'] as int? ?? -1;
       if (isMsu) {
-        // wusa exit codes ต่างจาก msiexec: 0=success, 3010=success ต้อง reboot,
-        // 2359302 (0x240006)=patch ติดตั้งอยู่แล้ว, 2359303=ไม่ applicable กับ OS นี้
+        // wusa exit codes ต่างจาก msiexec:
+        //   0 / 3010                   = success (3010 = ต้อง reboot)
+        //   2359302 (0x240006)         = patch ติดตั้งอยู่แล้ว
+        //   2359303 (0x240007)         = ไม่ applicable กับ OS นี้
+        //   -2145124329 (0x80240017)   = WU_E_NOT_APPLICABLE (ไม่ตรง OS/prereq) — verified บนเครื่องจริง
         if (code == 0 || code == 3010) return (true, 'patch installed (exit $code)');
         if (code == 2359302) return (true, 'patch already installed');
-        if (code == 2359303) return (false, 'patch not applicable to this OS');
+        if (code == 2359303 || code == -2145124329) return (false, 'patch not applicable to this OS');
         return (false, out['err'] as String? ?? 'wusa exit code $code');
       }
       if (code == 0 || code == 3010) return (true, 'exit code $code');
