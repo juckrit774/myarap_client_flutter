@@ -40,7 +40,7 @@
       </Component>
     </StandardDirectory>
 
-    <StandardDirectory Id="LOCALAPPDATA">
+    <StandardDirectory Id="LocalAppDataFolder">
       <Component Id="AutoStartRegistry" Guid="*">
         <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="MyARAP" Type="string" Value="[INSTALLFOLDER]myarap.exe" KeyPath="yes" />
       </Component>

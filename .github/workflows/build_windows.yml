@@ -43,15 +43,17 @@ jobs:
           retention-days: 30
 
       # ── MSI Installer (WiX v4) ───────────────────────────────────────────
-      - name: Install WiX v4
-        run: dotnet tool install --global wix
+      - name: Install WiX
+        # ⚠️ ต้อง pin version — ไม่ pin จะได้ v7 ซึ่งบังคับยอมรับ OSMF EULA (license เชิงพาณิชย์)
+        # แล้ว build ล้มด้วย "error WIX7015: You must accept the Open Source Maintenance Fee (OSMF) EULA"
+        run: dotnet tool install --global wix --version 5.0.2
 
       - name: Build MSI
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
           wix --version
-          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi -d SourceDir=build\windows\x64\runner\Release
+          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi -d SourceDir=build\windows\x64\runner\Release 2>&1 | Tee-Object -FilePath wix_build.log
 
       - name: Upload WiX build log
         if: always()
