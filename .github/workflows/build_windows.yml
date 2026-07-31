@@ -48,8 +48,11 @@ jobs:
         # แล้ว build ล้มด้วย "error WIX7015: You must accept the Open Source Maintenance Fee (OSMF) EULA"
         run: dotnet tool install --global wix --version 5.0.2
 
+      # ⚠️ ต้องเป็น pwsh (PowerShell 7) ไม่ใช่ `powershell` (Windows PowerShell 5.1)
+      # 5.1 อ่านไฟล์ .ps1 ที่ไม่มี BOM เป็น ANSI → ข้อความไทยกลายเป็น mojibake → parse error
+      # ทั้ง step ล้มก่อนรันบรรทัดแรกด้วยซ้ำ (เจอของจริง run#53) · ข้อความในสคริปต์จึงคง EN
       - name: Build MSI
-        shell: powershell
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
           wix --version
@@ -60,19 +63,25 @@ jobs:
           $src = "${{ github.workspace }}\build\windows\x64\runner\Release"
           Write-Host "SourceDir = $src"
           Get-ChildItem $src | Select-Object -First 5 Name, Length | Format-Table
-          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi -d SourceDir=$src 2>&1 | Tee-Object -FilePath wix_build.log
+          # wix v5 เงียบสนิทเมื่อสำเร็จ → `| Tee-Object` ไม่ได้รับ object เลยและ **ไม่สร้างไฟล์**
+          # ทำให้ artifact log หายไปเฉยๆ · เก็บเป็น string แล้วเขียนเองเสมอ
+          $out = (wix build installer\product.wxs -o installer\installer_output\MyARAP.msi -d SourceDir=$src 2>&1 | Out-String)
+          $exit = $LASTEXITCODE
+          "exit=$exit`n$out" | Set-Content -Encoding utf8 wix_build.log
+          Write-Host $out
+          if ($exit -ne 0) { throw "wix build failed with exit code $exit" }
 
       # กัน regression: MSI ที่ว่างเปล่าจะเล็กมาก (~64KB) ขณะที่ของจริงต้องใกล้เคียง EXE (~17MB)
       # ถ้าไม่เช็ค build จะ "สำเร็จ" แล้วปล่อย artifact ที่ติดตั้งแล้วไม่ได้อะไรเลย
-      - name: Verify MSI ไม่ว่างเปล่า
-        shell: powershell
+      - name: Verify MSI is not empty
+        shell: pwsh
         run: |
           $msi = "installer\installer_output\MyARAP.msi"
-          if (-not (Test-Path $msi)) { throw "ไม่พบไฟล์ MSI" }
+          if (-not (Test-Path $msi)) { throw "MSI not found at $msi" }
           $mb = (Get-Item $msi).Length / 1MB
           Write-Host ("MSI size = {0:N2} MB" -f $mb)
           if ($mb -lt 5) {
-            throw ("MSI ขนาด {0:N2} MB เล็กเกินไป — แปลว่าไม่มีไฟล์ถูก embed (ดู SourceDir)" -f $mb)
+            throw ("MSI is only {0:N2} MB - no payload embedded, check SourceDir" -f $mb)
           }
 
       - name: Upload WiX build log
