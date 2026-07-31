@@ -53,7 +53,27 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path installer\installer_output | Out-Null
           wix --version
-          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi -d SourceDir=build\windows\x64\runner\Release 2>&1 | Tee-Object -FilePath wix_build.log
+          # ⚠️ SourceDir ต้องเป็น absolute path — WiX resolve glob "$(var.SourceDir)\**" เทียบกับตำแหน่ง
+          # ของไฟล์ .wxs (installer\) ไม่ใช่ working directory · ถ้าส่ง relative จะกลายเป็น
+          # installer\build\windows\... ซึ่งไม่มีจริง → หาไฟล์ไม่เจอแล้ว "เงียบ" ไม่ error
+          # ผลคือ MSI สร้างสำเร็จแต่ **ว่างเปล่า** (File table 0 แถว, ไม่มี cabinet, ~64KB)
+          $src = "${{ github.workspace }}\build\windows\x64\runner\Release"
+          Write-Host "SourceDir = $src"
+          Get-ChildItem $src | Select-Object -First 5 Name, Length | Format-Table
+          wix build installer\product.wxs -o installer\installer_output\MyARAP.msi -d SourceDir=$src 2>&1 | Tee-Object -FilePath wix_build.log
+
+      # กัน regression: MSI ที่ว่างเปล่าจะเล็กมาก (~64KB) ขณะที่ของจริงต้องใกล้เคียง EXE (~17MB)
+      # ถ้าไม่เช็ค build จะ "สำเร็จ" แล้วปล่อย artifact ที่ติดตั้งแล้วไม่ได้อะไรเลย
+      - name: Verify MSI ไม่ว่างเปล่า
+        shell: powershell
+        run: |
+          $msi = "installer\installer_output\MyARAP.msi"
+          if (-not (Test-Path $msi)) { throw "ไม่พบไฟล์ MSI" }
+          $mb = (Get-Item $msi).Length / 1MB
+          Write-Host ("MSI size = {0:N2} MB" -f $mb)
+          if ($mb -lt 5) {
+            throw ("MSI ขนาด {0:N2} MB เล็กเกินไป — แปลว่าไม่มีไฟล์ถูก embed (ดู SourceDir)" -f $mb)
+          }
 
       - name: Upload WiX build log
         if: always()
