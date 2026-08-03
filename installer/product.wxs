@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="MyARAP"
-           Version="1.0.0.2"
+           Version="1.0.0.3"
            Manufacturer="ARSoft Mobile"
            UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
            Scope="perMachine">
@@ -11,9 +11,9 @@
 
     <Feature Id="Main" Title="MyARAP" Level="1">
       <ComponentGroupRef Id="AppFiles" />
+      <ComponentGroupRef Id="MachineRegistry" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="DesktopShortcut" />
-      <ComponentRef Id="AutoStartRegistry" />
     </Feature>
 
   </Package>
@@ -40,11 +40,16 @@
       </Component>
     </StandardDirectory>
 
-    <StandardDirectory Id="LocalAppDataFolder">
+    <!-- autostart ต้องเป็น HKLM ไม่ใช่ HKCU:
+         ติดตั้งผ่าน GPO Computer Startup Script จะรันในบริบท SYSTEM → HKCU = HKU\S-1-5-18
+         (hive ของ SYSTEM) ไม่ใช่ของ user ที่ล็อกอินจริง → agent ไม่ start เองหลัง login
+         HKLM\...\Run มีผลกับทุก user บนเครื่อง ทำงานได้ทั้งติดตั้งด้วยมือและผ่าน GPO
+         path ใส่ quote เพราะ "C:\Program Files\..." มีช่องว่าง -->
+    <ComponentGroup Id="MachineRegistry" Directory="INSTALLFOLDER">
       <Component Id="AutoStartRegistry" Guid="*">
-        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="MyARAP" Type="string" Value="[INSTALLFOLDER]myarap.exe" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="MyARAP" Type="string" Value="&quot;[INSTALLFOLDER]myarap.exe&quot;" KeyPath="yes" />
       </Component>
-    </StandardDirectory>
+    </ComponentGroup>
 
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <Files Include="$(var.SourceDir)\**" />
