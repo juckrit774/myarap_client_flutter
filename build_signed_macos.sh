@@ -21,7 +21,7 @@ xcodebuild -workspace Runner.xcworkspace -scheme Runner -configuration Debug bui
   -allowProvisioningUpdates -quiet
 cd ..
 
-APP=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 5 -name "myarap.app" -path "*Runner-*" -path "*Debug*" 2>/dev/null | head -1)
+APP=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 5 -iname "myarap.app" -path "*Runner-*" -path "*Debug*" 2>/dev/null | head -1)
 echo "==> signature:"
 codesign -dv "$APP" 2>&1 | grep -iE "TeamIdentifier|Signature=|Authority=Apple Dev" || true
 echo "==> done: $APP"
