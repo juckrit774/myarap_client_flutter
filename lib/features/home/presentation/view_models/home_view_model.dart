@@ -1172,6 +1172,38 @@ $result | ConvertTo-Json -Compress
     }
   }
 
+  /// สร้าง constraints ของ getDisplayMedia — **ต่างกันคนละแบบระหว่าง macOS กับ Windows**
+  ///
+  /// 🔴 Windows **ต้องระบุ `deviceId.exact`** ไม่งั้นล้มเหลว:
+  ///    `flutter_screen_capture.cc` วน `sources_` หา source ที่ id ตรงกับที่ส่งมา
+  ///    (default `"0"`) — แต่ `sources_` ว่างจนกว่าจะเรียก `getDesktopSources` ก่อน
+  ///    → คืน error "source not found!" → getDisplayMedia throw → **agent ไม่ตอบ SDP
+  ///    answer → WebRTC ไม่ติด → data channel ไม่เปิด → ควบคุมไม่ได้**
+  ///    (อาการนี้เงียบสนิท ไม่มี log ฝั่ง backend นอกจาก "offer แล้วไม่มี answer")
+  ///
+  /// macOS ไม่ต้อง: ไม่ส่ง deviceId → `useDefaultScreen = YES` → ใช้ ScreenCaptureKit ตรง
+  ///
+  /// ⚠️ ทั้งสองแพลตฟอร์มอ่านจาก constraints แค่ `mandatory.frameRate` ตัวเดียว —
+  /// width/height ไม่มีผล (เคยใส่แล้วทำ Windows พัง) ความคมมาจาก _tuneVideoSender()
+  Future<Map<String, dynamic>> _displayMediaConstraints() async {
+    final video = <String, dynamic>{
+      'mandatory': {'frameRate': 15.0},
+    };
+    if (Platform.isWindows) {
+      try {
+        final sources =
+            await desktopCapturer.getSources(types: [SourceType.Screen]);
+        if (sources.isNotEmpty) {
+          // จอแรก = จอหลัก (POC ยังไม่รองรับหลายจอ)
+          video['deviceId'] = {'exact': sources.first.id};
+        }
+      } catch (_) {
+        // หา source ไม่ได้ = ปล่อยให้ getDisplayMedia ล้มเองแล้วตกไป HTTP polling
+      }
+    }
+    return {'video': video, 'audio': false};
+  }
+
   /// ตั้งค่า encoder ของ video sender ให้เน้น "ความคมชัด" มากกว่า "ความลื่น"
   /// เรียกหลัง addTrack และก่อน createAnswer — ต้องมี sender แล้วจึงตั้งได้
   Future<void> _tuneVideoSender(RTCPeerConnection pc) async {
@@ -1223,12 +1255,8 @@ $result | ConvertTo-Json -Compress
       // ควบคุมไม่ได้) — ต้องส่งเฉพาะ key ที่ปลายทางอ่านจริงเท่านั้น
       //
       // ตัวที่ทำให้ภาพคมจริงคือ degradationPreference + maxBitrate ใน _tuneVideoSender()
-      final stream = await navigator.mediaDevices.getDisplayMedia({
-        'video': {
-          'mandatory': {'frameRate': 15.0},
-        },
-        'audio': false,
-      });
+      final stream = await navigator.mediaDevices.getDisplayMedia(
+          await _displayMediaConstraints());
       _remoteScreenStream = stream;
       for (final track in stream.getTracks()) {
         await pc.addTrack(track, stream);
