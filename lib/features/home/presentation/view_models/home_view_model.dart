@@ -1196,9 +1196,12 @@ $result | ConvertTo-Json -Compress
         if (sources.isNotEmpty) {
           // จอแรก = จอหลัก (POC ยังไม่รองรับหลายจอ)
           video['deviceId'] = {'exact': sources.first.id};
+        } else {
+          _remoteDiag(_remoteSessionId, 'getSources_empty', 'ไม่พบจอเลย');
         }
-      } catch (_) {
+      } catch (e) {
         // หา source ไม่ได้ = ปล่อยให้ getDisplayMedia ล้มเองแล้วตกไป HTTP polling
+        _remoteDiag(_remoteSessionId, 'getSources_failed', e);
       }
     }
     return {'video': video, 'audio': false};
@@ -1230,9 +1233,25 @@ $result | ConvertTo-Json -Compress
     }
   }
 
+  /// รายงานว่า WebRTC ล้มที่ขั้นไหนกลับ backend
+  ///
+  /// จำเป็นเพราะดู log ฝั่ง agent จากระยะไกลไม่ได้เลย — เดิมเวลา getDisplayMedia
+  /// หรือ createAnswer ล้ม จะเงียบสนิท ฝั่ง server เห็นแค่ "offer แล้วไม่มี answer"
+  /// ซึ่งแยกไม่ออกว่าติด permission / capturer / SDP / เครือข่าย
+  void _remoteDiag(String sessionId, String stage, Object? err) {
+    try {
+      NetworkManager.instance.postV3('/v3/api/device/remote/diag',
+          {'sessionId': sessionId, 'stage': stage, 'error': err?.toString() ?? ''});
+    } catch (_) {}
+  }
+
   Future<void> _onRemoteOffer(String sessionId, String offerSdp) async {
     if (sessionId.isEmpty || offerSdp.isEmpty) return;
-    if (_remoteSessionId != sessionId) return; // ยังไม่ผ่าน consent / session อื่น
+    if (_remoteSessionId != sessionId) {
+      // session ไม่ตรง = offer มาก่อน consent เสร็จ หรือเป็น session ที่ถูกทิ้งไปแล้ว
+      _remoteDiag(sessionId, 'session_mismatch', 'current=$_remoteSessionId');
+      return;
+    }
     await _stopWebrtc(); // ทิ้ง pc เก่าถ้ามี (offer ใหม่ทับ)
     try {
       final pc = await createPeerConnection({
@@ -1255,8 +1274,10 @@ $result | ConvertTo-Json -Compress
       // ควบคุมไม่ได้) — ต้องส่งเฉพาะ key ที่ปลายทางอ่านจริงเท่านั้น
       //
       // ตัวที่ทำให้ภาพคมจริงคือ degradationPreference + maxBitrate ใน _tuneVideoSender()
-      final stream = await navigator.mediaDevices.getDisplayMedia(
-          await _displayMediaConstraints());
+      final constraints = await _displayMediaConstraints();
+      _remoteDiag(sessionId, 'constraints', constraints.toString());
+      final stream =
+          await navigator.mediaDevices.getDisplayMedia(constraints);
       _remoteScreenStream = stream;
       for (final track in stream.getTracks()) {
         await pc.addTrack(track, stream);
@@ -1305,7 +1326,9 @@ $result | ConvertTo-Json -Compress
       if (sdp == null || sdp.isEmpty) return;
       await NetworkManager.instance.postV3(
           '/v3/api/device/remote/answer', {'sessionId': sessionId, 'sdp': sdp});
-    } catch (_) {
+      _remoteDiag(sessionId, 'answer_sent', 'sdp ${sdp.length} bytes');
+    } catch (e) {
+      _remoteDiag(sessionId, 'webrtc_failed', e);
       // WebRTC ใช้ไม่ได้ (permission/แพลตฟอร์ม/เครือข่าย) — ทิ้งเงียบ, HTTP polling ทำงานต่อ
       await _stopWebrtc();
     }
@@ -1442,6 +1465,12 @@ if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY'
       // ⚠️ ไม่มีปุ่มหยุดโต้ตอบกลับ Dart (PowerShell form call กลับ Dart ไม่ได้) — Disconnect
       //    ฝั่ง Windows agent = future; ปัจจุบันตัดได้จากฝั่ง admin เท่านั้น
       final safeViewer = viewer.replaceAll('"', '');
+      // ผู้ใช้ต้องแยกออกว่า "ถูกดู" กับ "ถูกควบคุม" ต่างกัน — ไม่งั้นไม่รู้ว่ามีคนสั่ง
+      // เมาส์/คีย์บอร์ดอยู่ · ข้อความ+สีต่างกันชัด (แดง = ดู, ส้มเข้ม = ควบคุม)
+      final bannerText = controlling
+          ? "  * $safeViewer กำลังควบคุมเมาส์และคีย์บอร์ดเครื่องนี้"
+          : "  * หน้าจอกำลังถูกดูโดย $safeViewer";
+      final bannerRgb = controlling ? "196, 88, 0" : "217, 31, 64";
       // form มีปุ่ม "หยุด" — คลิกแล้ว form ปิด → process exit (Dart ฟัง exitCode → disconnect)
       final script = '''
 Add-Type -AssemblyName System.Windows.Forms
@@ -1474,9 +1503,9 @@ public class MyarapBanner : Form {
 \$sw = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
 \$f.Size = New-Object System.Drawing.Size(440, 40)
 \$f.Location = New-Object System.Drawing.Point([int](\$sw/2 - 220), 6)
-\$f.BackColor = [System.Drawing.Color]::FromArgb(217, 31, 64)
+\$f.BackColor = [System.Drawing.Color]::FromArgb($bannerRgb)
 \$lbl = New-Object System.Windows.Forms.Label
-\$lbl.Text = "  * หน้าจอกำลังถูกดูโดย $safeViewer"
+\$lbl.Text = "$bannerText"
 \$lbl.ForeColor = 'White'
 \$lbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
 \$lbl.Location = New-Object System.Drawing.Point(0, 0)
@@ -1489,7 +1518,7 @@ public class MyarapBanner : Form {
 \$btn.Location = New-Object System.Drawing.Point(340, 6)
 \$btn.FlatStyle = 'Flat'
 \$btn.BackColor = [System.Drawing.Color]::White
-\$btn.ForeColor = [System.Drawing.Color]::FromArgb(217, 31, 64)
+\$btn.ForeColor = [System.Drawing.Color]::FromArgb($bannerRgb)
 \$btn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
 # MouseDown ไม่ใช่ Click — ยิงทันทีที่กดเมาส์ลง เป็นชั้นกันพลาดชั้นที่สอง
 \$btn.Add_MouseDown({ \$f.Close() })
