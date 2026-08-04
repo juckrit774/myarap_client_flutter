@@ -18,6 +18,8 @@
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:ffi/ffi.dart'; // calloc — dart:ffi ไม่มี allocator ให้ในตัว
+
 // ── ค่าคงที่จาก Windows SDK (winuser.h) ────────────────────────────────────
 const int _inputMouse = 0;
 const int _inputKeyboard = 1;
@@ -81,6 +83,11 @@ typedef _GetSystemMetricsNative = Int32 Function(Int32);
 typedef _GetSystemMetricsDart = int Function(int);
 
 class RemoteInputWindows {
+  /// ข้อความผิดพลาดล่าสุด — input ถูกออกแบบให้เงียบ (ไม่ล้ม session) แต่ถ้าเงียบทั้งหมด
+  /// จะไล่ปัญหาไม่ได้เลย จึงเก็บไว้ให้ดึงไปแสดง/ส่ง log ได้
+  static String? _lastError;
+  static String? get lastError => _lastError;
+
   static DynamicLibrary? _lib;
   static _SendInputDart? _sendInput;
   static _GetSystemMetricsDart? _getMetrics;
@@ -95,8 +102,10 @@ class RemoteInputWindows {
           .lookupFunction<_SendInputNative, _SendInputDart>('SendInput');
       _getMetrics = _lib!.lookupFunction<_GetSystemMetricsNative,
           _GetSystemMetricsDart>('GetSystemMetrics');
+      _lastError = null;
       return true;
-    } catch (_) {
+    } catch (e) {
+      _lastError = 'โหลด user32.dll ไม่สำเร็จ: $e';
       return false;
     }
   }
@@ -139,6 +148,9 @@ class RemoteInputWindows {
       int vk = 0,
       int scan = 0}) {
     if (!_ensure()) return;
+    // ⚠️ ห้ามใช้ `DynamicLibrary.process()` หา malloc/free — **บน Windows โยน
+    // UnsupportedError เสมอ** (รองรับเฉพาะ Linux/macOS) เคยใช้แล้วทำให้ input ทุกตัว
+    // ถูกทิ้งเงียบ ๆ เพราะ exception ถูก catch ที่ผู้เรียก — ใช้ calloc ของ package:ffi แทน
     final buf = calloc<Uint8>(_inputSize);
     try {
       _write(buf, type,
@@ -148,21 +160,12 @@ class RemoteInputWindows {
           flags: flags,
           vk: vk,
           scan: scan);
-      _sendInput!(1, buf, _inputSize);
+      final sent = _sendInput!(1, buf, _inputSize);
+      if (sent != 1) _lastError = 'SendInput ส่งได้ $sent จาก 1 event';
     } finally {
-      _free(buf);
+      calloc.free(buf);
     }
   }
-
-  // จองหน่วยความจำเอง — ไม่พึ่ง package:ffi (`calloc`) เพื่อไม่ต้องเพิ่ม dependency
-  static final _malloc = DynamicLibrary.process()
-      .lookupFunction<Pointer<Uint8> Function(IntPtr), Pointer<Uint8> Function(int)>(
-          'malloc');
-  static final _freeFn = DynamicLibrary.process()
-      .lookupFunction<Void Function(Pointer<Uint8>), void Function(Pointer<Uint8>)>(
-          'free');
-  static Pointer<Uint8> calloc<T>(int size) => _malloc(size);
-  static void _free(Pointer<Uint8> p) => _freeFn(p);
 
   /// เลื่อนเมาส์ — nx/ny เป็นสัดส่วน 0..1 ของจอหลัก
   ///
