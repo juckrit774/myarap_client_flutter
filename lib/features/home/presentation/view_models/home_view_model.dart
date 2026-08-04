@@ -1210,25 +1210,22 @@ $result | ConvertTo-Json -Compress
       });
       _remotePc = pc;
       // capture หน้าจอหลักเป็น video track (flutter_webrtc desktop รองรับ getDisplayMedia)
-      // ── คุณภาพภาพ (แก้ 2026-08-04 — เดิมภาพเบลออ่านตัวหนังสือไม่ออก) ──
+      // ── คุณภาพภาพ ────────────────────────────────────────────────────────
       //
-      // เดิมขอแค่ {'frameRate': 15} ไม่ระบุขนาด → ได้ logical resolution ของจอ
-      // (วัดจริงบน MacBook Retina: ได้ 1512x982 ทั้งที่จอ physical 3024x1964)
-      // ขอ 2560 กว้างเพื่อให้ได้ภาพคมกว่า logical โดยไม่ถึงขั้น 4K ที่กิน bandwidth เกินจำเป็น
+      // ⚠️ **width/height ใน constraints ไม่มีผลเลยทั้ง macOS และ Windows** — ตรวจซอร์ส
+      // flutter_webrtc 1.5.2 แล้วทั้งสองอ่านแค่ `mandatory.frameRate` ตัวเดียว
+      //   macOS   : common/darwin/Classes/FlutterRTCDesktopCapturer.m
+      //   Windows : common/cpp/src/flutter_screen_capture.cc
+      // resolution ถูกกำหนดโดย OS capturer เอง (macOS = logical resolution ของจอ)
+      //
+      // เคยลองใส่ width/height + minFrameRate/maxFrameRate แล้ว **ทำให้ Windows
+      // ตอบ SDP answer ไม่ได้เลย** (WebRTC ต่อไม่ติด → data channel ไม่เปิด →
+      // ควบคุมไม่ได้) — ต้องส่งเฉพาะ key ที่ปลายทางอ่านจริงเท่านั้น
+      //
+      // ตัวที่ทำให้ภาพคมจริงคือ degradationPreference + maxBitrate ใน _tuneVideoSender()
       final stream = await navigator.mediaDevices.getDisplayMedia({
         'video': {
-          'frameRate': 15,
-          'width': {'ideal': 2560},
-          'height': {'ideal': 1600},
-          // flutter_webrtc desktop อ่าน mandatory เป็นหลัก — ใส่คู่กันเพื่อครอบทั้ง 2 ทาง
-          'mandatory': {
-            'minWidth': 1280,
-            'minHeight': 720,
-            'maxWidth': 2560,
-            'maxHeight': 1600,
-            'minFrameRate': 5,
-            'maxFrameRate': 15,
-          },
+          'mandatory': {'frameRate': 15.0},
         },
         'audio': false,
       });
