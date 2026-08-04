@@ -1446,7 +1446,26 @@ if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY'
       final script = '''
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-\$f = New-Object System.Windows.Forms.Form
+# ⚠️ ต้องใช้ฟอร์มที่ **ไม่ขโมย focus** ไม่งั้นผู้ใช้ต้องกดปุ่มหยุด 2 ครั้ง:
+#    คลิกแรกถูกกินไปกับการ activate หน้าต่าง คลิกที่สองปุ่มถึงได้รับ event
+#    WS_EX_NOACTIVATE (0x08000000) = รับคลิกได้โดยไม่ต้อง activate ก่อน
+#    (พฤติกรรมเดียวกับ banner ฝั่ง macOS ที่ใช้ NSWindow level=.statusBar)
+Add-Type @"
+using System;
+using System.Windows.Forms;
+public class MyarapBanner : Form {
+  protected override bool ShowWithoutActivation { get { return true; } }
+  protected override CreateParams CreateParams {
+    get {
+      CreateParams cp = base.CreateParams;
+      cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+      cp.ExStyle |= 0x00000008; // WS_EX_TOPMOST
+      return cp;
+    }
+  }
+}
+"@ -ReferencedAssemblies System.Windows.Forms,System.Drawing
+\$f = New-Object MyarapBanner
 \$f.Text = "MYARAP Remote"
 \$f.FormBorderStyle = 'None'
 \$f.TopMost = \$true
@@ -1472,7 +1491,8 @@ Add-Type -AssemblyName System.Drawing
 \$btn.BackColor = [System.Drawing.Color]::White
 \$btn.ForeColor = [System.Drawing.Color]::FromArgb(217, 31, 64)
 \$btn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-\$btn.Add_Click({ \$f.Close() })
+# MouseDown ไม่ใช่ Click — ยิงทันทีที่กดเมาส์ลง เป็นชั้นกันพลาดชั้นที่สอง
+\$btn.Add_MouseDown({ \$f.Close() })
 \$f.Controls.Add(\$btn)
 [System.Windows.Forms.Application]::Run(\$f)
 ''';
