@@ -7,6 +7,7 @@ import CoreImage
 import Darwin      // host_statistics/host_statistics64 (CPU/Memory), getifaddrs (Network), proc_listpids/proc_pidinfo (libproc — Process/Thread count) — sandbox-safe read-only APIs
 import IOKit       // IOServiceMatching/IORegistryEntryCreateCFProperty (Disk IO stats)
 import IOKit.ps    // IOPSCopyPowerSourcesInfo (Energy/Battery) — public API, sandbox-safe, ไม่ต้อง entitlement เพิ่ม
+import ApplicationServices // AXIsProcessTrustedWithOptions + CGEventPost (Remote Control POC)
 import CoreLocation // POC: WiFi-based location (ไม่ใช่ GPS จริง — laptop ไม่มี GPS chip) ต้อง entitlement personal-information.location + Info.plist usage description
 
 // unified logging redact string-interpolated NSLog content เป็น <private> โดย default
@@ -476,6 +477,114 @@ class RemoteDisconnectTarget: NSObject {
 }
 
 // RemoteConsent: แสดง NSAlert ขอความยินยอมก่อนให้ดูหน้าจอ (view-only) + indicator ระหว่างถูกดู
+// ─────────────────────────────────────────────────────────────────────────────
+// RemoteInput — ยิงเมาส์/คีย์บอร์ดเข้าระบบจริงด้วย CGEventPost (Remote Control POC)
+//
+// ⚠️⚠️ ต้องได้สิทธิ์ **Accessibility** (System Settings › Privacy & Security › Accessibility)
+// คนละตัวกับ Screen Recording ที่ขอไว้แล้วสำหรับ capture หน้าจอ · **สั่งเปิดด้วยโค้ดไม่ได้**
+// ทำได้แค่เด้ง prompt พาไปหน้านั้น ผู้ใช้ต้องกดสวิตช์เอง
+//
+// ⚠️ TCC ผูกกับ **ลายเซ็น** — ถ้า build ไม่เซ็นแบบคงที่ สิทธิ์จะหลุดทุก rebuild
+//    ต้อง build ด้วย build_signed_macos.sh เท่านั้น (บทเรียนเดิมจาก Screen Recording)
+//
+// ⚠️ แอปนี้เปิด App Sandbox อยู่ — ยังไม่ยืนยันว่า CGEventPost ทะลุ sandbox ได้จริงหรือไม่
+//    ถ้ายิงแล้วไม่มีผล ทั้งที่ AXIsProcessTrusted = true → แปลว่า sandbox บล็อก
+//    ต้องตัดสินใจว่าจะปิด sandbox ไหม (กระทบ USB Block ที่พึ่ง DiskArbitration ใน sandbox)
+enum RemoteInput {
+  /// พิกัดที่ viewer ส่งมาเป็นสัดส่วน 0..1 ของจอ ไม่ใช่ px
+  /// เพราะ <video> ฝั่ง viewer ถูกย่อ/ขยายตามขนาด drawer — ส่ง px มาจะเพี้ยนทันทีที่ resize
+  private static func point(_ nx: Double, _ ny: Double) -> CGPoint {
+    let d = CGMainDisplayID()
+    let w = Double(CGDisplayPixelsWide(d))
+    let h = Double(CGDisplayPixelsHigh(d))
+    // clamp กัน viewer ส่งค่านอกช่วงแล้ว cursor กระเด็นออกนอกจอ
+    let x = min(max(nx, 0), 1) * w
+    let y = min(max(ny, 0), 1) * h
+    return CGPoint(x: x, y: y)
+  }
+
+  /// มีสิทธิ์ Accessibility แล้วหรือยัง · prompt=true → เด้ง dialog พาไป System Settings
+  static func trusted(prompt: Bool) -> Bool {
+    let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+    return AXIsProcessTrustedWithOptions([key: prompt] as CFDictionary)
+  }
+
+  private static var lastPos = CGPoint(x: 0, y: 0)
+  // ปุ่มที่กดค้างอยู่ — ต้องจำเพราะ CGEvent ของการ "ลาก" (drag) เป็น event คนละชนิดกับ move
+  private static var downButton: CGMouseButton? = nil
+
+  private static func post(_ type: CGEventType, _ pos: CGPoint, _ btn: CGMouseButton) {
+    guard let ev = CGEvent(mouseEventSource: nil, mouseType: type,
+                           mouseCursorPosition: pos, mouseButton: btn) else { return }
+    ev.post(tap: .cghidEventTap)
+  }
+
+  static func mouseMove(_ nx: Double, _ ny: Double) {
+    let p = point(nx, ny)
+    lastPos = p
+    // กดค้างอยู่ = ต้องส่ง drag ไม่ใช่ move ไม่งั้นการลากจะไม่ทำงาน
+    if let b = downButton {
+      post(b == .right ? .rightMouseDragged : .leftMouseDragged, p, b)
+    } else {
+      post(.mouseMoved, p, .left)
+    }
+  }
+
+  static func mouseDown(_ button: Int) {
+    let b: CGMouseButton = (button == 1) ? .right : (button == 2 ? .center : .left)
+    downButton = b
+    post(b == .right ? .rightMouseDown : (b == .center ? .otherMouseDown : .leftMouseDown), lastPos, b)
+  }
+
+  static func mouseUp(_ button: Int) {
+    let b: CGMouseButton = (button == 1) ? .right : (button == 2 ? .center : .left)
+    downButton = nil
+    post(b == .right ? .rightMouseUp : (b == .center ? .otherMouseUp : .leftMouseUp), lastPos, b)
+  }
+
+  static func scroll(_ dy: Int, _ dx: Int) {
+    // wheelCount:2 = รองรับทั้งแนวตั้งและแนวนอน · หน่วยเป็น "line" ไม่ใช่ pixel
+    // หาร 40 เพราะ deltaY ของเบราว์เซอร์มักเป็น ~100/คลิก แต่ line ของ macOS ละเอียดกว่ามาก
+    guard let ev = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2,
+                           wheel1: Int32(-dy / 40), wheel2: Int32(-dx / 40), wheel3: 0) else { return }
+    ev.post(tap: .cghidEventTap)
+  }
+
+  // ── คีย์บอร์ด ──────────────────────────────────────────────────────────────
+  //
+  // viewer ส่ง `KeyboardEvent.code` มา (ตำแหน่งปุ่มจริง) **ไม่ใช่** `key`
+  // เพราะ `key` เปลี่ยนตามภาษา/layout — พิมพ์ไทยแล้วกด Q จะได้ "ๆ" ทำให้ map ไม่ได้
+  // ส่วน `code` คงที่เสมอ ตรงกับ virtual keycode ของ macOS แบบ 1:1
+  private static let keyMap: [String: CGKeyCode] = [
+    "KeyA": 0, "KeyS": 1, "KeyD": 2, "KeyF": 3, "KeyH": 4, "KeyG": 5, "KeyZ": 6, "KeyX": 7,
+    "KeyC": 8, "KeyV": 9, "KeyB": 11, "KeyQ": 12, "KeyW": 13, "KeyE": 14, "KeyR": 15,
+    "KeyY": 16, "KeyT": 17, "Digit1": 18, "Digit2": 19, "Digit3": 20, "Digit4": 21,
+    "Digit6": 22, "Digit5": 23, "Equal": 24, "Digit9": 25, "Digit7": 26, "Minus": 27,
+    "Digit8": 28, "Digit0": 29, "BracketRight": 30, "KeyO": 31, "KeyU": 32,
+    "BracketLeft": 33, "KeyI": 34, "KeyP": 35, "Enter": 36, "KeyL": 37, "KeyJ": 38,
+    "Quote": 39, "KeyK": 40, "Semicolon": 41, "Backslash": 42, "Comma": 43, "Slash": 44,
+    "KeyN": 45, "KeyM": 46, "Period": 47, "Tab": 48, "Space": 49, "Backquote": 50,
+    "Backspace": 51, "Escape": 53,
+    "ArrowLeft": 123, "ArrowRight": 124, "ArrowDown": 125, "ArrowUp": 126,
+    "Delete": 117, "Home": 115, "End": 119, "PageUp": 116, "PageDown": 121,
+    "F1": 122, "F2": 120, "F3": 99, "F4": 118, "F5": 96, "F6": 97, "F7": 98,
+    "F8": 100, "F9": 101, "F10": 109, "F11": 103, "F12": 111,
+  ]
+
+  static func key(_ code: String, down: Bool, shift: Bool, ctrl: Bool, alt: Bool, meta: Bool) {
+    guard let kc = keyMap[code] else { return } // ปุ่มที่ไม่รู้จัก = ทิ้ง ไม่เดา
+    guard let ev = CGEvent(keyboardEventSource: nil, virtualKey: kc, keyDown: down) else { return }
+    var flags: CGEventFlags = []
+    if shift { flags.insert(.maskShift) }
+    if ctrl  { flags.insert(.maskControl) }
+    if alt   { flags.insert(.maskAlternate) }
+    if meta  { flags.insert(.maskCommand) }
+    ev.flags = flags
+    ev.post(tap: .cghidEventTap)
+  }
+}
+
+
 enum RemoteConsent {
   // banner windows — หนึ่งอันต่อหนึ่งจอ (ผู้ใช้หลายจอ: จอที่ถูก capture อาจไม่ใช่จอที่กำลังมอง
   // — เจอจริง: banner บน NSScreen.main จอเดียว โผล่ในภาพ Remote แต่ user มองอีกจอไม่เห็น)
@@ -497,20 +606,40 @@ enum RemoteConsent {
     }
   }
 
+  /// consent สำหรับ **การควบคุม** (เมาส์/คีย์บอร์ด) — แยกจาก ask() ที่เป็นการยินยอมให้ "ดู"
+  ///
+  /// 🔴 นี่คือจุดบังคับจริงเพียงจุดเดียวของทั้งระบบ — input วิ่ง P2P ผ่าน WebRTC data channel
+  /// ที่ backend มองไม่เห็นและบล็อกไม่ได้ ถ้าผู้ใช้ตรงนี้กดปฏิเสธ = คุมไม่ได้จริง ๆ
+  static func askControl(viewer: String, result: @escaping FlutterResult) {
+    DispatchQueue.main.async {
+      NSApp.activate(ignoringOtherApps: true)
+      let alert = NSAlert()
+      alert.messageText = "คำขอควบคุมเครื่องของคุณ"
+      alert.informativeText = "ผู้ดูแลระบบ \"\(viewer)\" ขอ**ควบคุมเมาส์และคีย์บอร์ด** ของเครื่องนี้\n\n"
+        + "ต่างจากการดูหน้าจอ — เมื่ออนุญาตแล้วเขาจะคลิกและพิมพ์บนเครื่องคุณได้จริง\n\n"
+        + "คุณหยุดได้ทุกเมื่อด้วยปุ่ม \"หยุด\" บนแถบแจ้งเตือนด้านบนจอ"
+      alert.alertStyle = .critical  // critical ไม่ใช่ warning — ความเสี่ยงสูงกว่าการดูเฉย ๆ
+      alert.addButton(withTitle: "อนุญาตให้ควบคุม")
+      alert.addButton(withTitle: "ปฏิเสธ")
+      let resp = alert.runModal()
+      result(resp == .alertFirstButtonReturn)
+    }
+  }
+
   // แสดง banner แดงลอยด้านบน "ทุกจอ" (always-on-top) + ปุ่ม "หยุด" ให้ผู้ใช้ตัดการถูกดูเองได้
-  static func showIndicator(viewer: String) {
+  static func showIndicator(viewer: String, controlling: Bool = false) {
     DispatchQueue.main.async {
       hideIndicatorNow()
-      dlog("[MYARAP-RD] showIndicator screens=\(NSScreen.screens.count)")
+      dlog("[MYARAP-RD] showIndicator screens=\(NSScreen.screens.count) controlling=\(controlling)")
       for screen in NSScreen.screens {
         dlog("[MYARAP-RD] banner on screen frame=\(screen.frame)")
-        indicatorWindows.append(makeBanner(on: screen, viewer: viewer))
+        indicatorWindows.append(makeBanner(on: screen, viewer: viewer, controlling: controlling))
       }
       dlog("[MYARAP-RD] banners created=\(indicatorWindows.count)")
     }
   }
 
-  private static func makeBanner(on screen: NSScreen, viewer: String) -> NSWindow {
+  private static func makeBanner(on screen: NSScreen, viewer: String, controlling: Bool = false) -> NSWindow {
     let w: CGFloat = 440, h: CGFloat = 40
     let x = screen.frame.midX - w / 2
     let y = screen.frame.maxY - h - 8 // ชิดบนใต้ menu bar ของจอนั้น
@@ -527,7 +656,11 @@ enum RemoteConsent {
     container.layer?.backgroundColor = NSColor(calibratedRed: 0.85, green: 0.12, blue: 0.25, alpha: 0.95).cgColor
     container.layer?.cornerRadius = 8
 
-    let label = NSTextField(labelWithString: "🔴  หน้าจอกำลังถูกดูโดย \(viewer)")
+    // ข้อความต้องแยกให้ชัดระหว่าง "ถูกดู" กับ "ถูกควบคุม" — ผู้ใช้ต้องรู้ว่ามีคนสั่งเมาส์/คีย์บอร์ดอยู่
+    let msg = controlling
+      ? "🔴  \(viewer) กำลัง**ควบคุม**เมาส์และคีย์บอร์ดเครื่องนี้"
+      : "🔴  หน้าจอกำลังถูกดูโดย \(viewer)"
+    let label = NSTextField(labelWithString: msg)
     label.frame = NSRect(x: 14, y: 0, width: w - 110, height: h)
     label.alignment = .left
     label.textColor = .white
@@ -839,12 +972,44 @@ class MainFlutterWindow: NSWindow {
         let args = call.arguments as? [String: Any]
         let viewer = args?["viewer"] as? String ?? "ผู้ดูแลระบบ"
         RemoteConsent.ask(viewer: viewer, result: result)
+      case "requestControlConsent":
+        let args = call.arguments as? [String: Any]
+        let viewer = args?["viewer"] as? String ?? "ผู้ดูแลระบบ"
+        RemoteConsent.askControl(viewer: viewer, result: result)
       case "showIndicator":
         let args = call.arguments as? [String: Any]
-        RemoteConsent.showIndicator(viewer: args?["viewer"] as? String ?? "")
+        RemoteConsent.showIndicator(viewer: args?["viewer"] as? String ?? "",
+                                    controlling: args?["controlling"] as? Bool ?? false)
         result(nil)
       case "hideIndicator":
         RemoteConsent.hideIndicator()
+        result(nil)
+      // ── Remote Control (POC) — ยิง input เข้าระบบจริง ──
+      // แยกเป็น method ย่อยแทนที่จะรับ payload ก้อนเดียว เพื่อให้ฝั่ง Dart อ่านง่ายและ
+      // เพิ่ม/ลด event ทีละชนิดได้โดยไม่ต้องแก้ parser ทั้งก้อน
+      case "inputTrusted":
+        // prompt=true → เด้ง dialog ของ macOS พาไปหน้า Accessibility (สั่งเปิดเองไม่ได้)
+        let args = call.arguments as? [String: Any]
+        result(RemoteInput.trusted(prompt: args?["prompt"] as? Bool ?? false))
+      case "mouseMove":
+        let a = call.arguments as? [String: Any]
+        RemoteInput.mouseMove(a?["x"] as? Double ?? 0, a?["y"] as? Double ?? 0)
+        result(nil)
+      case "mouseDown":
+        RemoteInput.mouseDown((call.arguments as? [String: Any])?["b"] as? Int ?? 0)
+        result(nil)
+      case "mouseUp":
+        RemoteInput.mouseUp((call.arguments as? [String: Any])?["b"] as? Int ?? 0)
+        result(nil)
+      case "scroll":
+        let a = call.arguments as? [String: Any]
+        RemoteInput.scroll(a?["dy"] as? Int ?? 0, a?["dx"] as? Int ?? 0)
+        result(nil)
+      case "key":
+        let a = call.arguments as? [String: Any]
+        RemoteInput.key(a?["c"] as? String ?? "", down: a?["down"] as? Bool ?? false,
+                        shift: a?["s"] as? Bool ?? false, ctrl: a?["ctrl"] as? Bool ?? false,
+                        alt: a?["alt"] as? Bool ?? false, meta: a?["meta"] as? Bool ?? false)
         result(nil)
       default:
         result(FlutterMethodNotImplemented)

@@ -11,6 +11,7 @@ import '../../data/models/device_model.dart';
 import '../../../auth/models/login_response_model.dart';
 import '../../../../core/services/network_manager.dart';
 import '../../../../core/storage/cache_manager.dart';
+import '../../../../core/services/remote_input_windows.dart';
 
 // heartbeat interval เมื่อ V3 ไม่ส่ง dueDateTime กลับมา
 const _kHeartbeatInterval = Duration(minutes: 10);
@@ -489,6 +490,13 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
         break;
       case 'remote_stop':
         _stopRemoteCapture();
+        break;
+      case 'remote_control_request':
+        _onRemoteControlRequest(
+            m['sessionId'] as String? ?? '', m['by'] as String? ?? 'ผู้ดูแลระบบ');
+        break;
+      case 'remote_control_revoke':
+        _onRemoteControlRevoke();
         break;
       case 'metrics_request':
         // viewer เปิด Asset Detail → ขอวัดค่าตอนนี้เลย (Activity Monitor card, live pull)
@@ -1028,6 +1036,168 @@ $result | ConvertTo-Json -Compress
   // video track (getDisplayMedia) → ตอบ answer → media ไหล P2P (ผ่าน STUN, ไม่มี TURN).
   // HTTP frame upload เดิมยังรันเป็น fallback — WebRTC ต่อติดแล้วลดเหลือทุก 3s (keep-alive)
 
+  // ── Remote Control (POC 2026-08-04) ────────────────────────────────────────
+  RTCDataChannel? _remoteInputDc;
+  // ผู้ใช้ที่เครื่องนี้กดยินยอมให้ "ควบคุม" แล้วหรือยัง — คนละตัวกับ consent การ "ดู" หน้าจอ
+  // ยินยอมให้ดู ≠ ยินยอมให้สั่งงาน จึงต้องถามแยกและเก็บ flag แยก
+  bool _remoteControlGranted = false;
+
+  /// viewer ขอสิทธิ์ควบคุม (SSE ) → ถามผู้ใช้ที่เครื่องนี้
+  Future<void> _onRemoteControlRequest(String sessionId, String viewer) async {
+    if (sessionId.isEmpty || _remoteSessionId != sessionId) return;
+    bool accept = false;
+    try {
+      accept = await _requestControlConsent(viewer);
+    } catch (_) {
+      accept = false;
+    }
+    _remoteControlGranted = accept;
+    if (accept) {
+      _showRemoteIndicator(viewer, controlling: true);
+      // สิทธิ์ Accessibility เป็นคนละตัวกับ Screen Recording — ถ้ายังไม่ได้ให้ เด้ง prompt
+      // พาไป System Settings (สั่งเปิดด้วยโค้ดไม่ได้ ผู้ใช้ต้องกดสวิตช์เอง)
+      // ⚠️ ยินยอมแล้วแต่ไม่มีสิทธิ์นี้ = คลิก/พิมพ์จะไม่มีผลใด ๆ แบบเงียบ ๆ
+      if (Platform.isMacOS) {
+        try {
+          final ok = await _remoteChannel
+                  .invokeMethod<bool>('inputTrusted', {'prompt': true}) ??
+              false;
+          if (!ok) {
+            debugPrint('[MYARAP-RC] ยังไม่มีสิทธิ์ Accessibility — input จะไม่มีผลจนกว่าจะเปิดใน System Settings');
+          }
+        } catch (_) {}
+      }
+    }
+    await NetworkManager.instance.postV3('/v3/api/device/remote/control-consent',
+        {'sessionId': sessionId, 'accept': accept});
+  }
+
+  /// viewer เลิกควบคุม หรือผู้ใช้กดหยุด → ปิดการรับ input ทันที (session ยังอยู่ ดูต่อได้)
+  void _onRemoteControlRevoke() {
+    _remoteControlGranted = false;
+  }
+
+  /// รับข้อความจาก data channel — **ทุกทางเข้าของ input ต้องผ่านฟังก์ชันนี้**
+  void _onRemoteInput(String raw) {
+    Map<String, dynamic> m;
+    try {
+      m = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return;
+    }
+    final t = m['t'] as String? ?? '';
+    // ขั้นทดสอบ transport — ตอบ pong ได้แม้ยังไม่ได้รับอนุญาตควบคุม
+    // (ไม่ใช่การสั่งงานเครื่อง จึงไม่ต้อง gate)
+    if (t == 'ping') {
+      _remoteInputDc?.send(RTCDataChannelMessage(jsonEncode({
+        't': 'pong',
+        'at': m['at'],
+        'granted': _remoteControlGranted,
+      })));
+      return;
+    }
+    // 🔴 ประตูบานเดียวของการสั่งงานจริง — ยังไม่ยินยอม = ทิ้งทุก event เงียบ ๆ
+    if (!_remoteControlGranted) return;
+    // ยิงแบบ fire-and-forget — ไม่ await เพราะเมาส์เลื่อนถี่มาก การรอผลจะทำให้หน่วงสะสม
+    //
+    // macOS  → MethodChannel → Swift CGEventPost
+    // Windows → dart:ffi → user32.dll SendInput **ตรงจาก Dart**
+    //   (ไม่ผ่าน MethodChannel เพราะ Windows runner เป็น C++ ที่ยังไม่มี plugin ของเรา
+    //    และ FFI เร็วกว่าเพราะไม่ต้องข้าม platform channel ต่อ event)
+    final x = (m['x'] as num?)?.toDouble() ?? 0;
+    final y = (m['y'] as num?)?.toDouble() ?? 0;
+    final btn = (m['b'] as num?)?.toInt() ?? 0;
+    final dy = (m['dy'] as num?)?.toInt() ?? 0;
+    final dx = (m['dx'] as num?)?.toInt() ?? 0;
+    try {
+      if (Platform.isMacOS) {
+        switch (t) {
+          case 'm':
+            _remoteChannel.invokeMethod('mouseMove', {'x': x, 'y': y});
+            break;
+          case 'md':
+            _remoteChannel.invokeMethod('mouseDown', {'b': btn});
+            break;
+          case 'mu':
+            _remoteChannel.invokeMethod('mouseUp', {'b': btn});
+            break;
+          case 'w':
+            _remoteChannel.invokeMethod('scroll', {'dy': dy, 'dx': dx});
+            break;
+          case 'kd':
+          case 'ku':
+            final mod = (m['mod'] as Map?) ?? const {};
+            _remoteChannel.invokeMethod('key', {
+              'c': m['c'] as String? ?? '',
+              'down': t == 'kd',
+              's': mod['s'] == true,
+              'ctrl': mod['c'] == true,
+              'alt': mod['a'] == true,
+              'meta': mod['m'] == true,
+            });
+            break;
+        }
+      } else if (Platform.isWindows) {
+        switch (t) {
+          case 'm':
+            RemoteInputWindows.mouseMove(x, y);
+            break;
+          case 'md':
+            RemoteInputWindows.mouseDown(btn);
+            break;
+          case 'mu':
+            RemoteInputWindows.mouseUp(btn);
+            break;
+          case 'w':
+            RemoteInputWindows.scroll(dy, dx);
+            break;
+          case 'kd':
+          case 'ku':
+            // Windows ไม่มี flag modifier รวมแบบ macOS — ต้องกดค้าง/ปล่อยเองรอบปุ่มหลัก
+            final mod = (m['mod'] as Map?) ?? const {};
+            final sh = mod['s'] == true, ct = mod['c'] == true, al = mod['a'] == true;
+            final code = m['c'] as String? ?? '';
+            if (t == 'kd') {
+              RemoteInputWindows.modifiers(shift: sh, ctrl: ct, alt: al, down: true);
+              RemoteInputWindows.keyByCode(code, down: true);
+            } else {
+              RemoteInputWindows.keyByCode(code, down: false);
+              RemoteInputWindows.modifiers(shift: sh, ctrl: ct, alt: al, down: false);
+            }
+            break;
+        }
+      }
+    } catch (_) {
+      // ยิงไม่สำเร็จ = ทิ้ง event นั้นไป ไม่ล้ม session (event ถัดไปมาทับอยู่แล้ว)
+    }
+  }
+
+  /// ตั้งค่า encoder ของ video sender ให้เน้น "ความคมชัด" มากกว่า "ความลื่น"
+  /// เรียกหลัง addTrack และก่อน createAnswer — ต้องมี sender แล้วจึงตั้งได้
+  Future<void> _tuneVideoSender(RTCPeerConnection pc) async {
+    try {
+      final senders = await pc.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind != 'video') continue;
+        final params = sender.parameters;
+        params.degradationPreference = RTCDegradationPreference.MAINTAIN_RESOLUTION;
+        final encodings = params.encodings;
+        if (encodings == null || encodings.isEmpty) {
+          params.encodings = [RTCRtpEncoding(maxBitrate: 8000000, maxFramerate: 15)];
+        } else {
+          for (final e in encodings) {
+            e.maxBitrate = 8000000; // 8 Mbps
+            e.maxFramerate = 15;
+            e.scaleResolutionDownBy = 1.0; // ห้ามย่อ — ค่า default บางแพลตฟอร์มย่อ 2 เท่า
+          }
+        }
+        await sender.setParameters(params);
+      }
+    } catch (_) {
+      // ตั้งไม่สำเร็จ = ใช้ค่า default ต่อ (ภาพเบลอกว่าแต่ยังใช้งานได้) ไม่ควรล้ม session
+    }
+  }
+
   Future<void> _onRemoteOffer(String sessionId, String offerSdp) async {
     if (sessionId.isEmpty || offerSdp.isEmpty) return;
     if (_remoteSessionId != sessionId) return; // ยังไม่ผ่าน consent / session อื่น
@@ -1040,14 +1210,51 @@ $result | ConvertTo-Json -Compress
       });
       _remotePc = pc;
       // capture หน้าจอหลักเป็น video track (flutter_webrtc desktop รองรับ getDisplayMedia)
+      // ── คุณภาพภาพ (แก้ 2026-08-04 — เดิมภาพเบลออ่านตัวหนังสือไม่ออก) ──
+      //
+      // เดิมขอแค่ {'frameRate': 15} ไม่ระบุขนาด → ได้ logical resolution ของจอ
+      // (วัดจริงบน MacBook Retina: ได้ 1512x982 ทั้งที่จอ physical 3024x1964)
+      // ขอ 2560 กว้างเพื่อให้ได้ภาพคมกว่า logical โดยไม่ถึงขั้น 4K ที่กิน bandwidth เกินจำเป็น
       final stream = await navigator.mediaDevices.getDisplayMedia({
-        'video': {'frameRate': 15},
+        'video': {
+          'frameRate': 15,
+          'width': {'ideal': 2560},
+          'height': {'ideal': 1600},
+          // flutter_webrtc desktop อ่าน mandatory เป็นหลัก — ใส่คู่กันเพื่อครอบทั้ง 2 ทาง
+          'mandatory': {
+            'minWidth': 1280,
+            'minHeight': 720,
+            'maxWidth': 2560,
+            'maxHeight': 1600,
+            'minFrameRate': 5,
+            'maxFrameRate': 15,
+          },
+        },
         'audio': false,
       });
       _remoteScreenStream = stream;
       for (final track in stream.getTracks()) {
         await pc.addTrack(track, stream);
       }
+      // 🔴 จุดที่ทำให้ภาพเบลอที่สุด — ไม่ใช่ resolution แต่เป็น degradationPreference
+      //
+      // WebRTC default = `balanced`/`maintain-framerate` แปลว่าเมื่อ bandwidth ตึง
+      // จะ **ลดความคมชัดเพื่อรักษา fps** ซึ่งตรงข้ามกับสิ่งที่ remote desktop ต้องการ:
+      // ดูหน้าจอคนอื่นต้องการ "ตัวหนังสืออ่านออก" มากกว่า "ลื่นไหล"
+      // → maintain-resolution = ยอมให้ fps ตกแทน แต่ภาพยังคม
+      //
+      // maxBitrate 8 Mbps: พอสำหรับข้อความคมชัดที่ 2560px · ในวง LAN ไม่มีปัญหา
+      // เน็ตช้าจะเห็นเป็น "กระตุก" แทน "เบลอ" ซึ่งเป็นการแลกที่ตั้งใจ
+      await _tuneVideoSender(pc);
+      // ── Remote Control (POC) — viewer สร้าง data channel 'input' มากับ offer ──
+      // 🔴 **จุดบังคับจริงเพียงจุดเดียวของทั้งระบบ** — input วิ่ง P2P ตรง backend มองไม่เห็น
+      // และบล็อกไม่ได้ · agent จึงต้องไม่รับ input จนกว่าผู้ใช้ที่เครื่องนี้จะกดยินยอมเอง
+      // ( ตั้งเป็น true ที่ _onRemoteControlRequest เท่านั้น)
+      pc.onDataChannel = (channel) {
+        if (channel.label != 'input') return;
+        _remoteInputDc = channel;
+        channel.onMessage = (msg) => _onRemoteInput(msg.text);
+      };
       pc.onConnectionState = (state) {
         if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
           // media ไหล P2P แล้ว — ลด HTTP upload เหลือ keep-alive (ประหยัด bandwidth/CPU)
@@ -1126,6 +1333,45 @@ $result | ConvertTo-Json -Compress
     return args;
   }
 
+  /// consent สำหรับ **การควบคุม** — แยกจาก _requestRemoteConsent (ที่เป็นการยินยอมให้ "ดู")
+  /// เพราะยินยอมให้ดูหน้าจอ ไม่ได้แปลว่ายินยอมให้คนอื่นสั่งเมาส์/คีย์บอร์ดเครื่องตัวเอง
+  Future<bool> _requestControlConsent(String viewer) async {
+    if (Platform.isMacOS) {
+      try {
+        return await _remoteChannel
+                .invokeMethod<bool>('requestControlConsent', {'viewer': viewer}) ??
+            false;
+      } catch (_) {
+        return false;
+      }
+    }
+    if (Platform.isWindows) {
+      // MessageBox แบบ blocking บน owner form TopMost — รูปแบบเดียวกับ consent การ "ดู"
+      // ⚠️ ต้องใช้ _psArgs (-EncodedCommand) ไม่ใช่ -Command เพราะภาษาไทย + quote
+      //    ทำ encoding พังจน dialog ไม่โผล่ (เจอจริงตอนทำ consent การดู)
+      final safeViewer = viewer.replaceAll("'", "''");
+      final script = '''
+Add-Type -AssemblyName System.Windows.Forms
+\$owner = New-Object System.Windows.Forms.Form
+\$owner.TopMost = \$true
+\$msg = "ผู้ดูแลระบบ '$safeViewer' ขอควบคุมเมาส์และคีย์บอร์ดของเครื่องนี้`n`n" +
+  "ต่างจากการดูหน้าจอ - เมื่ออนุญาตแล้วเขาจะคลิกและพิมพ์บนเครื่องคุณได้จริง`n`n" +
+  "อนุญาตหรือไม่?"
+\$r = [System.Windows.Forms.MessageBox]::Show(\$owner, \$msg, "คำขอควบคุมเครื่องของคุณ",
+  [System.Windows.Forms.MessageBoxButtons]::YesNo,
+  [System.Windows.Forms.MessageBoxIcon]::Warning)
+if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { Write-Output "ACCEPT" } else { Write-Output "DENY" }
+''';
+      try {
+        final r = await Process.run('powershell', _psArgs(script));
+        return (r.stdout as String).contains('ACCEPT');
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
+  }
+
   Future<bool> _requestRemoteConsent(String viewer) async {
     if (Platform.isMacOS) {
       try {
@@ -1157,10 +1403,12 @@ if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY'
     return false;
   }
 
-  Future<void> _showRemoteIndicator(String viewer) async {
+    /// controlling=true → เปลี่ยนข้อความ indicator เป็น "กำลังถูกควบคุม"
+  /// ผู้ใช้ต้องแยกออกว่าตอนนี้ถูกดูเฉย ๆ หรือถูกสั่งงานเมาส์/คีย์บอร์ดจริง
+  Future<void> _showRemoteIndicator(String viewer, {bool controlling = false}) async {
     if (Platform.isMacOS) {
       try {
-        await _remoteChannel.invokeMethod('showIndicator', {'viewer': viewer});
+        await _remoteChannel.invokeMethod('showIndicator', {'viewer': viewer, 'controlling': controlling});
       } catch (_) {}
       return;
     }
