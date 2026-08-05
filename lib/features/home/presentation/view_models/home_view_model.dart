@@ -56,7 +56,10 @@ class HomeViewModel extends ChangeNotifier {
   bool _remoteConsentPending = false; // consent dialog กำลังเปิดอยู่ — กัน remote_start ซ้ำเด้ง popup ซ้อน
   String _remoteSessionId = ''; // session ที่กำลัง active (ใช้ตอนผู้ใช้กด Disconnect เอง)
   Process? _winIndicatorProc;   // Windows: process ของ topmost banner form (kill ตอน stop)
-  bool _winIndicatorStopByUs = false; // true = เรา kill เอง (normal stop); false = user กดปุ่มหยุด
+  // เดิมมี flag `_winIndicatorStopByUs` แยกว่า "เรา kill เอง" กับ "user กดปุ่มหยุด"
+  // แต่มี race: ตอนเปลี่ยน banner (ดู → ควบคุม) เรา kill ตัวเก่าแล้ว start ตัวใหม่ทันที
+  // exitCode ของตัวเก่ายิงทีหลังตอน flag ถูก reset แล้ว → ตัด session ทิ้งผิด ๆ
+  // → ใช้ **identity check กับ _winIndicatorProc** แทน (ดู proc.exitCode.then ข้างล่าง)
 
   // WebRTC (low-latency upgrade) — สร้างเมื่อได้ SDP offer จาก viewer ผ่าน SSE
   RTCPeerConnection? _remotePc;
@@ -1506,20 +1509,36 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::Run(\$f)
 ''';
       try {
-        _winIndicatorStopByUs = false;
+        // 🔴 ต้องปิด banner เดิมก่อนเสมอ — ไม่งั้นตอนขอควบคุมจะได้ banner ซ้อน 2 อัน
+        // (อันเดิม "กำลังถูกดู" + อันใหม่ "กำลังควบคุม") แล้วพอหยุด จะหายไปแค่อันเดียว
+        // เพราะ _winIndicatorProc ถูกเขียนทับ ทำให้ไม่มี reference ไป kill ตัวเก่า
+        // macOS ไม่เจอปัญหานี้เพราะ showIndicator เรียก hideIndicatorNow() ก่อนเสมอ
+        final old = _winIndicatorProc;
+        _winIndicatorProc = null; // ตัดสิทธิ์ตัวเก่าก่อน kill (ดู guard ใน exitCode ข้างล่าง)
+        old?.kill();
+
         // ไม่ await — form.Run บล็อกจนกว่า process ถูก kill หรือ user กดปุ่มหยุด
         final proc = await Process.start('powershell', _psArgs(script, hidden: true));
         _winIndicatorProc = proc;
         // ฟัง exit: ถ้า process จบเองโดยเราไม่ได้ kill = user กดปุ่มหยุด → disconnect
-        proc.exitCode.then((_) => _onWindowsIndicatorClosed());
+        //
+        // ⚠️ เทียบ identity กับ _winIndicatorProc ปัจจุบัน **แทนการใช้ flag รวม**
+        // เพราะ flag มี race: ตอนเปลี่ยน banner เรา kill ตัวเก่าแล้ว start ตัวใหม่ทันที
+        // exitCode ของตัวเก่า (async) อาจยิงหลังจากที่ flag ถูก reset เป็น false ไปแล้ว
+        // → เข้าใจผิดว่า user กดปุ่มหยุด → ตัด session ทิ้งทั้งที่ผู้ใช้ไม่ได้ทำอะไร
+        proc.exitCode.then((_) {
+          if (!identical(_winIndicatorProc, proc)) return; // ถูกแทนที่ไปแล้ว = เราปิดเอง
+          _onWindowsIndicatorClosed();
+        });
       } catch (_) {}
       return;
     }
   }
 
   // Windows: indicator form ปิด (user กดปุ่มหยุด) → หยุด capture + แจ้ง backend จบ session
+  /// เรียกเฉพาะเมื่อ **ผู้ใช้กดปุ่มหยุดเอง** — ผู้เรียก (exitCode handler) กรอง
+  /// กรณีที่เรา kill เองออกไปแล้วด้วย identity check
   void _onWindowsIndicatorClosed() {
-    if (_winIndicatorStopByUs) return; // เรา kill เอง (normal stop) — ไม่ใช่ user กด
     _winIndicatorProc = null;
     final sid = _remoteSessionId;
     _remoteCaptureTimer?.cancel();
@@ -1536,9 +1555,10 @@ Add-Type -AssemblyName System.Drawing
     if (Platform.isMacOS) {
       _remoteChannel.invokeMethod('hideIndicator').catchError((_) => null);
     } else if (Platform.isWindows) {
-      _winIndicatorStopByUs = true; // บอก exitCode handler ว่านี่คือ normal stop ไม่ใช่ user กดปุ่ม
-      _winIndicatorProc?.kill();
+      // ตั้ง null **ก่อน** kill — exitCode handler เช็ค identity แล้วจะรู้เองว่าเราปิด
+      final proc = _winIndicatorProc;
       _winIndicatorProc = null;
+      proc?.kill();
     }
   }
 
