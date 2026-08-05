@@ -14,6 +14,9 @@ final _navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // ต้องมาก่อน updateBaseUrl — heartbeat แรกส่ง agentVersion ไปด้วย ถ้ายังไม่ init
+  // จะรายงานค่าว่างให้ backend แล้วหน้า Hardware จะโชว์ '-' จนกว่าจะ heartbeat รอบถัดไป
+  await AppConfig.init();
   await NetworkManager.instance.updateBaseUrl();
 
   // Windows: กด X → ย่อลง system tray (mini bar) แทนปิดโปรแกรม (agent ต้องรันต่อเนื่อง)
