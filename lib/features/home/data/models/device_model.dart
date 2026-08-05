@@ -25,11 +25,18 @@ class ApplicationInfo {
   final String name;
   final String version;
   final int size;
+  /// ผู้พัฒนา — Windows: registry `Publisher` · macOS: common name จาก code signature
+  final String publisher;
+  /// ที่มา: user (คนลงเอง) | system (มากับ OS/runtime) | store (Store/App Store)
+  /// ว่าง = ยังไม่รู้ → ฝั่ง backend จะถือเป็น user เพื่อไม่ให้พฤติกรรมเดิมเปลี่ยน
+  final String source;
 
   const ApplicationInfo({
     required this.name,
     required this.version,
     required this.size,
+    this.publisher = '',
+    this.source = '',
   });
 }
 
@@ -205,6 +212,8 @@ class DeviceDetail {
               name: name,
               version: am['version'] as String? ?? '',
               size: am['size'] as int? ?? 0,
+              publisher: am['publisher'] as String? ?? '',
+              source: am['source'] as String? ?? '',
             ));
           }
         }
@@ -286,6 +295,8 @@ class DeviceDetail {
               name: name,
               version: item['version'] as String? ?? '',
               size: (item['size'] as num?)?.toInt() ?? 0,
+              publisher: item['publisher'] as String? ?? '',
+              source: item['source'] as String? ?? '',
             ));
           }
         }
@@ -333,6 +344,13 @@ class DeviceDetail {
   }
 
   static Future<Map<String, dynamic>> _windowsInfo() async {
+    // ⚠️ สคริปต์นี้ถูกส่งเป็น argument ของ powershell -Command → **เก็บเป็น ASCII ล้วน**
+    // (คอมเมนต์ภาษาไทยอยู่ฝั่ง Dart เท่านั้น)
+    //
+    // applications: 3 ที่มา — registry Uninstall (HKLM/Wow6432Node/HKCU) + Get-AppxPackage
+    // แต่ละรายการติด `source` = user | system | store เพื่อให้ backend แยกของที่มากับ OS
+    // ออกจากของที่คนลงเอง (ไม่งั้นยอด Unclassified บวมด้วย VC++ Redist/Windows components)
+    // และติด `publisher` จาก registry Publisher (มีมาแต่เดิมแต่ agent ไม่เคยส่ง)
     const script = r'''
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -391,14 +409,39 @@ $apps = @(foreach ($path in $regPaths) {
       $name = $_.DisplayName.Trim()
       if (-not $seen[$name]) {
         $seen[$name] = $true
+        # SystemComponent=1 or ParentKeyName set = runtime/redistributable hidden from
+        # Add/Remove Programs (VC++ Redist, .NET runtime) -> classify as system
+        $isSys = ($_.SystemComponent -eq 1) -or ($_.ParentKeyName -ne $null)
         @{
-          name    = $name
-          version = if ($_.DisplayVersion) { $_.DisplayVersion } else { '' }
-          size    = [long]($_.EstimatedSize) * 1024
+          name      = $name
+          version   = if ($_.DisplayVersion) { $_.DisplayVersion } else { '' }
+          size      = [long]($_.EstimatedSize) * 1024
+          publisher = if ($_.Publisher) { $_.Publisher.Trim() } else { '' }
+          source    = if ($isSys) { 'system' } else { 'user' }
         }
       }
     }
 })
+
+# Store apps never appear under registry Uninstall - must be queried separately.
+# SilentlyContinue: some machines block the Appx cmdlets by policy.
+$apps += @(Get-AppxPackage -ErrorAction SilentlyContinue |
+  Where-Object { -not $_.IsFramework -and $_.Name } |
+  ForEach-Object {
+    $dn = $_.Name
+    if (-not $seen[$dn]) {
+      $seen[$dn] = $true
+      @{
+        name      = $dn
+        version   = $_.Version.ToString()
+        size      = 0
+        publisher = if ($_.Publisher) { ($_.Publisher -replace '^CN=([^,]+).*$', '$1').Trim() } else { '' }
+        # bundled Windows components -> system, anything else -> store
+        source    = if ($dn -like 'Microsoft.Windows*' -or $dn -like 'Microsoft.UI*' -or
+                        $dn -like 'Microsoft.VCLibs*' -or $dn -like 'Microsoft.NET*') { 'system' } else { 'store' }
+      }
+    }
+  })
 
 @{
   serialNumber    = $bios.SerialNumber

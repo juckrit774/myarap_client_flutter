@@ -225,20 +225,61 @@ class MacDeviceInfo {
     }
   }
 
+  /// ดึงชื่อผู้พัฒนาจาก **code signature** ของ .app
+  ///
+  /// macOS ไม่มี field "Publisher" แบบ Windows registry — แหล่งที่เชื่อถือได้ที่สุดคือใบเซ็น
+  /// เช่น "Developer ID Application: Google LLC (EQHXZ8M8AV)" → ตัดเหลือ "Google LLC"
+  /// ของ Apple เองจะเป็น "Software Signing" / "Apple Mac OS Application Signing"
+  ///
+  /// ⚠️ เรียกทีละแอปบนเครื่องที่มี ~100 แอป ใช้เวลาพอควร แต่รันบน background queue
+  /// และส่งแค่ตอน heartbeat (10 นาที/ครั้ง) จึงไม่กระทบ UI
+  private static func publisherOf(_ url: URL) -> String {
+    var codeRef: SecStaticCode?
+    guard SecStaticCodeCreateWithPath(url as CFURL, [], &codeRef) == errSecSuccess,
+          let code = codeRef else { return "" }
+    var infoRef: CFDictionary?
+    guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation),
+                                        &infoRef) == errSecSuccess,
+          let info = infoRef as? [String: Any] else { return "" }
+    // certificates[0] = leaf → common name คือชื่อผู้เซ็น
+    if let certs = info["certificates"] as? [SecCertificate], let leaf = certs.first {
+      var cn: CFString?
+      if SecCertificateCopyCommonName(leaf, &cn) == errSecSuccess, let name = cn as String? {
+        // "Developer ID Application: Google LLC (EQHXZ8M8AV)" → "Google LLC"
+        var v = name
+        if let r = v.range(of: ": ") { v = String(v[r.upperBound...]) }
+        if let r = v.range(of: " (") { v = String(v[..<r.lowerBound]) }
+        v = v.trimmingCharacters(in: .whitespaces)
+        // "Software Signing" = ใบเซ็นที่ Apple ใช้กับ component ของ macOS เอง → Apple Inc.
+        if v == "Software Signing" { return "Apple Inc." }
+        // ⚠️ "Apple Mac OS Application Signing" = ใบที่ Apple **เซ็นทับให้ทุกแอปที่ผ่าน App Store**
+        // ไม่ใช่ชื่อผู้พัฒนา (ตรวจบนเครื่องจริง: OneDrive ของ Microsoft ก็ได้ค่านี้)
+        // คืนค่าว่างดีกว่าเดาผิด — UI จะโชว์ "—"
+        if v == "Apple Mac OS Application Signing" { return "" }
+        return v
+      }
+    }
+    return ""
+  }
+
   private static func getAllApplications() -> [[String: Any]] {
     let fm = FileManager.default
     // รวมทุก location: /Applications, /System/Applications, ~/Applications
-    var searchDirs: [URL] = []
+    // เก็บคู่ (dir, source) — เดิมวนอ่าน 3 ที่แล้วทิ้งข้อมูลว่ามาจากไหน ทำให้แยกไม่ออกว่า
+    // อันไหนเป็นของ Apple ที่มากับเครื่อง (/System/Applications) กับที่คนลงเอง (/Applications)
+    var searchDirs: [(url: URL, source: String)] = []
     for mask: FileManager.SearchPathDomainMask in [.localDomainMask, .systemDomainMask, .userDomainMask] {
+      // systemDomainMask = /System/Applications = ของ Apple ล้วน ถอนไม่ได้
+      let src = (mask == .systemDomainMask) ? "system" : "user"
       if let u = try? fm.url(for: .applicationDirectory, in: mask, appropriateFor: nil, create: false) {
-        searchDirs.append(u)
+        searchDirs.append((u, src))
         // /System/Applications/Utilities และ Subfolder อื่น
         if let subs = try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: [.isDirectoryKey],
                                                    options: [.skipsPackageDescendants, .skipsSubdirectoryDescendants]) {
           for sub in subs where sub.pathExtension != "app" {
             var isDir: ObjCBool = false
             if fm.fileExists(atPath: sub.path, isDirectory: &isDir), isDir.boolValue {
-              searchDirs.append(sub)
+              searchDirs.append((sub, src)) // subfolder สืบทอด source ของ parent
             }
           }
         }
@@ -246,7 +287,7 @@ class MacDeviceInfo {
     }
     var seen = Set<String>()
     var result: [[String: Any]] = []
-    for dir in searchDirs {
+    for (dir, source) in searchDirs {
       let entries = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [],
                                                   options: [.skipsPackageDescendants, .skipsSubdirectoryDescendants])) ?? []
       for url in entries where url.pathExtension == "app" {
@@ -270,7 +311,13 @@ class MacDeviceInfo {
         if name.isEmpty { name = url.deletingPathExtension().lastPathComponent }
         guard !seen.contains(name) else { continue }
         seen.insert(name)
-        result.append(["name": name, "version": version, "size": size])
+        // Mac App Store ฝากไฟล์ receipt ไว้ — ใช้แยก store ออกจาก user ที่ลงเอง
+        let isStore = fm.fileExists(atPath: url.appendingPathComponent("Contents/_MASReceipt/receipt").path)
+        result.append([
+          "name": name, "version": version, "size": size,
+          "publisher": publisherOf(url),
+          "source": isStore ? "store" : source,
+        ])
       }
     }
     return result

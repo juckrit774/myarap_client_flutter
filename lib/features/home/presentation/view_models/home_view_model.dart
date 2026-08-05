@@ -216,9 +216,12 @@ class HomeViewModel extends ChangeNotifier {
       final items = d.applications
           .map((app) => {
                 'name': app.name,
-                'vendor': '',
+                // เดิมส่งค่าว่างตายตัว ทั้งที่ Windows ดึง Publisher มาได้อยู่แล้ว
+                // ทำให้คอลัมน์ Publisher ในหน้า Software ว่างเปล่ามาตลอด
+                'vendor': app.publisher,
                 'version': app.version,
                 'size': app.size,
+                'source': app.source,
               })
           .toList();
       await NetworkManager.instance.putV3('/v3/api/device/software', {'software': items});
