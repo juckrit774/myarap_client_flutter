@@ -855,10 +855,27 @@ $cachedGB = if ($cacheSample) { [math]::Round($cacheSample.CounterSamples[0].Coo
 $pageFile = Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue
 $swapUsedGB = if ($pageFile) { [math]::Round((($pageFile | Measure-Object -Property CurrentUsage -Sum).Sum) / 1024, 2) } else { 0 }
 
-$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'"
 $diskTotalGB = [math]::Round($disk.Size / 1GB, 2)
 $diskFreeGB = [math]::Round($disk.FreeSpace / 1GB, 2)
 $diskUsedGB = [math]::Round($diskTotalGB - $diskFreeGB, 2)
+
+# per-partition capacity - DriveType=3 = local fixed disk (skips USB / optical / network)
+# the three totals above stay on the system drive so existing rows keep working
+$volumes = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue |
+  Sort-Object DeviceID | ForEach-Object {
+    $t = [math]::Round($_.Size / 1GB, 2)
+    $f = [math]::Round($_.FreeSpace / 1GB, 2)
+    @{
+      mount     = $_.DeviceID
+      name      = if ($_.VolumeName) { $_.VolumeName } else { '' }
+      totalGB   = $t
+      freeGB    = $f
+      usedGB    = [math]::Round($t - $f, 2)
+      boot      = ($_.DeviceID -eq $env:SystemDrive)
+      removable = $false
+    }
+  })
 
 $net = Get-Counter '\Network Interface(*)\Bytes Received/sec','\Network Interface(*)\Bytes Sent/sec' -ErrorAction SilentlyContinue
 $rxKBs = 0.0; $txKBs = 0.0
@@ -956,6 +973,7 @@ $result = @{
   memPhysicalGB = $totalMemGB; memUsedGB = $usedMemGB; memCachedGB = $cachedGB; memSwapUsedGB = $swapUsedGB
   memAppGB = $appGB; memWiredGB = $wiredGB; memCompressedGB = $compressedGB
   diskFreeGB = $diskFreeGB; diskUsedGB = $diskUsedGB; diskTotalGB = $diskTotalGB
+  volumes = $volumes
   diskReadsCount = $diskReadsCount; diskWritesCount = $diskWritesCount
   diskReadsPerSec = $diskReadsPerSec; diskWritesPerSec = $diskWritesPerSec
   diskDataReadGB = $diskDataReadGB; diskDataWrittenGB = $diskDataWrittenGB
@@ -968,7 +986,7 @@ $result = @{
   energyImpactPct = [math]::Round($cpuSys + $cpuUser, 1)
 }
 if ($lat -ne $null -and $lng -ne $null) { $result.lat = $lat; $result.lng = $lng }
-$result | ConvertTo-Json -Compress
+$result | ConvertTo-Json -Compress -Depth 4
 ''';
     final proc = await Process.run('powershell', _psArgs(script, hidden: true),
         stdoutEncoding: const SystemEncoding());
@@ -1702,6 +1720,18 @@ $bmp.Save($ms, $enc, $ep)
       // GPU
       'gpu':          d.gpu,             // "Apple M4"
       'gpuVendor':    gpuVendor,         // "Apple"
+      // Volumes — array of {mount,name,fs,total,free,boot,removable}
+      // ส่งเป็น list เพราะเครื่องหนึ่งมีได้หลายพาร์ทิชัน · field diskName/diskType/diskSize
+      // ด้านบนยังส่งเหมือนเดิม (ของไดรฟ์ระบบ) เพื่อไม่ให้ asset/รายงานเดิมพัง
+      'volumes': d.volumes.map((v) => {
+        'mount':     v.mount,
+        'name':      v.name,
+        'fs':        v.fs,
+        'total':     v.totalBytes,
+        'free':      v.freeBytes,
+        'boot':      v.boot,
+        'removable': v.removable,
+      }).toList(),
       // Displays — array of {name, resolutionX, resolutionY, builtin}
       'displays': d.displaysDetail.map((disp) => {
         'name':        disp.name,

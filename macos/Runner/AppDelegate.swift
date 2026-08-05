@@ -211,6 +211,37 @@ class MacDeviceInfo {
     return 0
   }
 
+  /// ทุก volume ที่ mount อยู่จริง (ไม่รวมของระบบที่ผู้ใช้ไม่เห็น เช่น /System/Volumes/*)
+  ///
+  /// เดิมส่งแค่ความจุ/ที่ว่างของ volume แรกที่เจอเป็นตัวเลขเดี่ยว ๆ เครื่องที่แบ่งหลาย partition
+  /// หรือมีดิสก์นอกเสียบอยู่จึงเห็นแค่ลูกเดียวใน MYARAP
+  /// `.skipHiddenVolumes` ตัด volume ที่ Finder ไม่โชว์ออกให้แล้ว (Preboot/Recovery/VM)
+  private static func getVolumes() -> [[String: Any]] {
+    let keys: [URLResourceKey] = [
+      .volumeNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey,
+      .volumeIsRemovableKey, .volumeIsInternalKey, .volumeLocalizedFormatDescriptionKey,
+    ]
+    let urls = FileManager.default.mountedVolumeURLs(
+      includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
+    var out: [[String: Any]] = []
+    for url in urls {
+      guard let v = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+      let total = v.volumeTotalCapacity ?? 0
+      if total <= 0 { continue }
+      out.append([
+        "mount": url.path,
+        "name": v.volumeName ?? url.lastPathComponent,
+        "fs": v.volumeLocalizedFormatDescription ?? "",
+        "total": total,
+        "free": Int(v.volumeAvailableCapacityForImportantUsage ?? 0),
+        // "/" = boot volume · removable ไว้แยกดิสก์นอกออกจากพาร์ทิชันในเครื่องฝั่ง UI
+        "boot": url.path == "/",
+        "removable": v.volumeIsRemovable ?? false,
+      ])
+    }
+    return out
+  }
+
   private static func getDisplays() -> [[String: Any]] {
     return NSScreen.screens.map { screen in
       let scale = screen.backingScaleFactor
@@ -373,6 +404,7 @@ class MacDeviceInfo {
         "storageType":      extractKey(stor, key: "Medium"),
         "storageCapacity":  getStorageCapacity(),
         "storageAvailable": getStorageAvailable(),
+      "volumes":          getVolumes(),
 
         "displays": getDisplays(),
         "gpu":      getGPU(),

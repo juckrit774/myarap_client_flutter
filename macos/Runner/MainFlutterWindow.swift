@@ -57,6 +57,8 @@ enum SystemMetrics {
         "memCachedGB": mem.cachedGB, "memSwapUsedGB": mem.swapUsedGB,
         "memAppGB": mem.appGB, "memWiredGB": mem.wiredGB, "memCompressedGB": mem.compressedGB,
         "diskFreeGB": disk.freeGB, "diskUsedGB": disk.usedGB, "diskTotalGB": disk.totalGB,
+        // ต่อพาร์ทิชัน — 3 field ข้างบนยังเป็นของ "/" เหมือนเดิม กันของเก่าพัง
+        "volumes": SystemMetrics.volumeUsages(),
         "diskReadsCount": diskIO.readsCount, "diskWritesCount": diskIO.writesCount,
         "diskReadsPerSec": diskIO.readsPerSec, "diskWritesPerSec": diskIO.writesPerSec,
         "diskDataReadGB": diskIO.dataReadGB, "diskDataWrittenGB": diskIO.dataWrittenGB,
@@ -134,6 +136,36 @@ enum SystemMetrics {
   }
 
   // ---- Disk: volume capacity ของ "/" (ไม่ใช่ IOKit read/write IOPS — ตัดสินใจ simplify) ----
+  /// ความจุของทุก volume ที่ mount อยู่ — ไม่ใช่แค่ "/" ตัวเดียว
+  /// เครื่องที่แบ่งหลายพาร์ทิชันหรือมีดิสก์นอกเสียบ จะเห็นครบทุกลูกในการ์ด Disk
+  /// `.skipHiddenVolumes` ตัด Preboot/Recovery/VM ที่ผู้ใช้ไม่เห็นใน Finder ออกให้แล้ว
+  static func volumeUsages() -> [[String: Any]] {
+    let keys: [URLResourceKey] = [
+      .volumeNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey,
+      .volumeIsRemovableKey,
+    ]
+    let urls = FileManager.default.mountedVolumeURLs(
+      includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
+    let gb = 1_073_741_824.0
+    var out: [[String: Any]] = []
+    for url in urls {
+      guard let v = try? url.resourceValues(forKeys: Set(keys)),
+            let total = v.volumeTotalCapacity, total > 0 else { continue }
+      let totalGB = Double(total) / gb
+      let freeGB = Double(v.volumeAvailableCapacityForImportantUsage ?? 0) / gb
+      out.append([
+        "mount": url.path,
+        "name": v.volumeName ?? url.lastPathComponent,
+        "totalGB": totalGB,
+        "freeGB": freeGB,
+        "usedGB": max(0, totalGB - freeGB),
+        "boot": url.path == "/",
+        "removable": v.volumeIsRemovable ?? false,
+      ])
+    }
+    return out
+  }
+
   private static func diskUsage() -> (freeGB: Double, usedGB: Double, totalGB: Double) {
     guard let values = try? URL(fileURLWithPath: "/").resourceValues(
       forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),

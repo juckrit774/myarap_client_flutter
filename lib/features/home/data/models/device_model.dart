@@ -21,6 +21,24 @@ class DisplayInfo {
   }
 }
 
+/// 1 พาร์ทิชัน/volume ที่ mount อยู่ — เครื่องหนึ่งมีได้หลายลูก
+/// (Windows: C:, D: … · macOS: /, /Volumes/…)
+class VolumeInfo {
+  final String mount;   // "C:" หรือ "/Volumes/Data"
+  final String name;    // ชื่อที่ผู้ใช้ตั้ง
+  final String fs;      // NTFS / APFS
+  final int totalBytes;
+  final int freeBytes;
+  final bool boot;      // ไดรฟ์ที่ OS ติดตั้งอยู่
+  final bool removable; // ดิสก์นอก — ฝั่ง UI ใช้แยกออกจากพาร์ทิชันในเครื่อง
+
+  const VolumeInfo({
+    required this.mount, required this.name, required this.fs,
+    required this.totalBytes, required this.freeBytes,
+    this.boot = false, this.removable = false,
+  });
+}
+
 class ApplicationInfo {
   final String name;
   final String version;
@@ -38,6 +56,27 @@ class ApplicationInfo {
     this.publisher = '',
     this.source = '',
   });
+}
+
+List<VolumeInfo> _parseVolumes(dynamic raw) {
+  if (raw is! List) return const [];
+  final out = <VolumeInfo>[];
+  for (final e in raw) {
+    if (e is! Map) continue;
+    final m = e.cast<String, dynamic>();
+    final total = (m['total'] as num?)?.toInt() ?? 0;
+    if (total <= 0) continue; // volume ที่อ่านความจุไม่ได้ = ไม่ต้องโชว์
+    out.add(VolumeInfo(
+      mount: m['mount'] as String? ?? '',
+      name: m['name'] as String? ?? '',
+      fs: m['fs'] as String? ?? '',
+      totalBytes: total,
+      freeBytes: (m['free'] as num?)?.toInt() ?? 0,
+      boot: m['boot'] == true,
+      removable: m['removable'] == true,
+    ));
+  }
+  return out;
 }
 
 class DeviceDetail {
@@ -94,6 +133,7 @@ class DeviceDetail {
 
   // Applications
   final List<ApplicationInfo> applications;
+  final List<VolumeInfo> volumes;
 
   // Active app (macOS: NSWorkspace frontmostApplication)
   final String frontmostApp;
@@ -133,6 +173,7 @@ class DeviceDetail {
     required this.ipAddress,
     required this.displaysDetail,
     required this.applications,
+    this.volumes = const [],
     this.frontmostApp = '',
   });
 
@@ -255,6 +296,7 @@ class DeviceDetail {
       ipAddress: s('ipAddress'),
       displaysDetail: displays,
       applications: apps,
+      volumes: _parseVolumes(m['volumes']),
       frontmostApp: s('frontmostApp'),
     );
   }
@@ -340,12 +382,16 @@ class DeviceDetail {
       ipAddress: s('ipAddress'),
       displaysDetail: displays,
       applications: applications,
+      volumes: _parseVolumes(info['volumes']),
     );
   }
 
   static Future<Map<String, dynamic>> _windowsInfo() async {
     // ⚠️ สคริปต์นี้ถูกส่งเป็น argument ของ powershell -Command → **เก็บเป็น ASCII ล้วน**
     // (คอมเมนต์ภาษาไทยอยู่ฝั่ง Dart เท่านั้น)
+    //
+    // volumes: ทุกไดรฟ์ที่เป็น local fixed disk (DriveType=3) — ไม่เอา USB/ออปติคัล/network drive
+    // เดิมอ่านแค่ไดรฟ์ระบบตัวเดียว เครื่องที่แบ่ง partition (C: + D:) จึงเห็นแค่ลูกเดียวใน MYARAP
     //
     // applications: 3 ที่มา — registry Uninstall (HKLM/Wow6432Node/HKCU) + Get-AppxPackage
     // แต่ละรายการติด `source` = user | system | store เพื่อให้ backend แยกของที่มากับ OS
@@ -360,7 +406,7 @@ $cs       = Get-CimInstance Win32_ComputerSystem
 $cpu      = Get-CimInstance Win32_Processor | Select-Object -First 1
 $os       = Get-CimInstance Win32_OperatingSystem
 $prod     = Get-CimInstance Win32_ComputerSystemProduct
-$disk     = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+$disk     = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'"
 $physDisk = Get-PhysicalDisk | Sort-Object Size -Descending | Select-Object -First 1
 $ip       = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
               $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.*'
@@ -375,6 +421,19 @@ $storageType = switch ($physDisk.MediaType) {
   'HDD'         { 'HDD' }
   default       { 'Unknown' }
 }
+
+# every local fixed disk (DriveType=3) - excludes USB / optical / network drives
+$vols = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue |
+  Sort-Object DeviceID | ForEach-Object {
+    @{
+      mount = $_.DeviceID
+      name  = if ($_.VolumeName) { $_.VolumeName } else { '' }
+      fs    = if ($_.FileSystem) { $_.FileSystem } else { '' }
+      total = [long]($_.Size)
+      free  = [long]($_.FreeSpace)
+      boot  = ($_.DeviceID -eq $env:SystemDrive)
+    }
+  })
 
 $bootTime = $os.LastBootUpTime
 $uptime = (Get-Date) - $bootTime
@@ -466,6 +525,7 @@ $apps += @(Get-AppxPackage -ErrorAction SilentlyContinue |
   timeSinceBoot   = $uptimeStr
   ipAddress       = $ip
   displays        = $displays
+  volumes         = $vols
   applications    = $apps
 } | ConvertTo-Json -Depth 4
 ''';
