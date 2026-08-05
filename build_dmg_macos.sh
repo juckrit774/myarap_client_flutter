@@ -5,11 +5,13 @@
 # `flutter build macos` ตรง ๆ เพราะเซ็นแบบ ad-hoc → ลายเซ็นเปลี่ยนทุก build →
 # ผู้ใช้ต้อง grant Screen Recording / Accessibility ใหม่ทุกครั้งที่อัปเดต
 #
-# ปลายทาง: อาร์กิวเมนต์ที่ 1 (ไม่ใส่ = โฟลเดอร์ปัจจุบัน)
+# ปลายทาง: อาร์กิวเมนต์ที่ 1 · ไม่ใส่ = โฟลเดอร์ staging บน external disk ถ้าเสียบอยู่
+# (/Volumes/Disk/06_packgate = ที่รวมไฟล์ที่จะเอาไป upload — Archive/ ข้างในเป็นของเก่า)
 set -e
 cd "$(dirname "$0")"
 
-OUT_DIR="${1:-$PWD}"
+PACKGATE="/Volumes/Disk/06_packgate"
+OUT_DIR="${1:-$([ -d "$PACKGATE" ] && echo "$PACKGATE" || echo "$PWD")}"
 VER=$(grep -m1 'MYARAP_DISPLAY_VERSION' macos/Runner/Configs/AppInfo.xcconfig | awk -F'= *' '{print $2}' | tr -d ' ')
 DMG="$OUT_DIR/MyARAP-${VER}.dmg"
 
