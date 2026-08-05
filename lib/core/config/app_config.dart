@@ -42,7 +42,9 @@ class AppConfig {
     if (_version.isEmpty) return '';
     if (_version.split('.').length >= 4) return _version; // macOS
     if (_build.isEmpty) return _version;
-    return '\$_version.\$_build';                          // Windows: 1.0.0 + 4 → 1.0.0.4
+    // ⚠️ ห้าม escape `$` ที่นี่ — เคยเป็น '\$_version.\$_build' ทำให้ Windows รายงานเวอร์ชัน
+    // ออกมาเป็นสตริงดิบ "$_version.$_build" ตรง ๆ (macOS ไม่โดนเพราะ return ตั้งแต่บรรทัดบน)
+    return '$_version.$_build'; // Windows: 1.0.0 + 4 → 1.0.0.4
   }
 
   static String get buildNumber => _build;
