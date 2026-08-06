@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -563,29 +566,123 @@ class _TicketDetailState extends State<_TicketDetail> {
 
   Widget _imagesCard(AppPalette c, ProblemModel t) => AppCard(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const CardTitle('รูปที่แนบมา'),
+          CardTitle('รูปที่แนบมา (${t.imageList.length})'),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: [
-              for (final url in t.imageList)
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.network(url,
-                      width: 128,
-                      height: 96,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => Container(
-                            width: 128,
-                            height: 96,
-                            color: c.soft,
-                            alignment: Alignment.center,
-                            child: Icon(Icons.broken_image_outlined,
-                                size: 18, color: c.dim),
-                          )),
-                ),
+              for (final src in t.imageList) _Attachment(src: src),
             ],
           ),
         ]),
       );
+}
+
+/// รูปที่แนบมากับเรื่อง — รองรับ **2 รูปแบบ**
+///
+/// V3 เก็บรูปเป็น data URL (`data:image/jpeg;base64,…`) เพราะ agent ส่งเป็น base64
+/// ตอนแจ้งเรื่อง — `Image.network` เปิดไม่ได้ ต้อง decode เองแล้วใช้ `Image.memory`
+/// (ของเก่า V2 เป็น http URL จึงยังต้องรองรับคู่กัน)
+///
+/// เป็น StatefulWidget เพื่อ **decode ครั้งเดียวตอน initState** — รูปใหญ่ได้ถึง 2 MB
+/// และการ์ดนี้ rebuild ทุกครั้งที่เพิ่มบันทึก/ปิดงาน ถ้า decode ใน build จะสะดุดทุกครั้ง
+class _Attachment extends StatefulWidget {
+  const _Attachment({required this.src});
+  final String src;
+
+  @override
+  State<_Attachment> createState() => _AttachmentState();
+}
+
+class _AttachmentState extends State<_Attachment> {
+  Uint8List? _bytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _decode();
+  }
+
+  void _decode() {
+    final s = widget.src;
+    if (!s.startsWith('data:')) return; // http URL — ปล่อยให้ Image.network จัดการ
+    final i = s.indexOf(',');
+    if (i < 0) return;
+    try {
+      _bytes = base64Decode(s.substring(i + 1));
+    } catch (_) {
+      // data URL เสีย — ตกไปแสดงไอคอนรูปพัง ดีกว่าทั้งการ์ดหาย
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = AppColors.of(context);
+    Widget broken(double w, double h) => Container(
+          width: w,
+          height: h,
+          color: c.soft,
+          alignment: Alignment.center,
+          child: Icon(Icons.broken_image_outlined, size: 18, color: c.dim),
+        );
+
+    Widget thumb;
+    if (_bytes != null) {
+      thumb = Image.memory(_bytes!,
+          width: 128,
+          height: 96,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => broken(128, 96));
+    } else if (widget.src.startsWith('data:')) {
+      thumb = broken(128, 96);
+    } else {
+      thumb = Image.network(widget.src,
+          width: 128,
+          height: 96,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => broken(128, 96));
+    }
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        // รูปถ่ายหน้าจอที่ย่อเหลือ 128px อ่านไม่ออก — กดดูเต็มได้
+        onTap: () => _showFull(context),
+        child: ClipRRect(borderRadius: BorderRadius.circular(8), child: thumb),
+      ),
+    );
+  }
+
+  void _showFull(BuildContext context) {
+    final c = AppColors.of(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.card,
+        insetPadding: const EdgeInsets.all(40),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: c.line),
+        ),
+        child: Stack(children: [
+          InteractiveViewer(
+            maxScale: 5,
+            child: _bytes != null
+                ? Image.memory(_bytes!, fit: BoxFit.contain)
+                : Image.network(widget.src, fit: BoxFit.contain),
+          ),
+          Positioned(
+            top: 6,
+            right: 6,
+            child: IconButton(
+              icon: Icon(Icons.close, size: 18, color: c.dim),
+              onPressed: () => Navigator.of(ctx).pop(),
+              splashRadius: 16,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
 }

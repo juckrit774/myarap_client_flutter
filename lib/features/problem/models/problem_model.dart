@@ -116,8 +116,12 @@ class ProblemModel {
                   ?.map((e) => e.toString())
                   .toList() ??
               [],
-      imageList: (json['imageList'] as List<dynamic>?)
+      // ⚠️ V3 ส่งรูปมาใน **`attachments`** ไม่ใช่ `imageList` แบบ V2 — เดิมอ่านแต่ `imageList`
+      // ทำให้รูปที่แนบตอนแจ้งเรื่อง **ไม่เคยแสดงเลย** ทั้งบน Windows และ macOS
+      // (ค่าที่ได้เป็น data URL `data:image/jpeg;base64,...` ไม่ใช่ http URL — ดู `_Attachment`)
+      imageList: ((json['attachments'] ?? json['imageList']) as List<dynamic>?)
               ?.map((e) => e.toString())
+              .where((e) => e.isNotEmpty)
               .toList() ??
           [],
       remark: json['remark'] as String? ?? json['description'] as String? ?? '',
