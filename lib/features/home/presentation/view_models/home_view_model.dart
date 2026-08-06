@@ -1583,9 +1583,12 @@ foreach (\$scr in [System.Windows.Forms.Screen]::AllScreens) {
     \$fB = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
     \$fR = New-Object System.Drawing.Font('Segoe UI', 10)
     \$name = "$safeViewer"
-    \$e.Graphics.DrawString(\$name, \$fB, \$white, 30, 12, \$sf)
-    \$nw = \$e.Graphics.MeasureString(\$name, \$fB, 1000, \$sf).Width
-    \$e.Graphics.DrawString("$bannerTail", \$fR, \$white, 30 + \$nw, 12, \$sf)
+    \$sz = \$e.Graphics.MeasureString(\$name, \$fB, 1000, \$sf)
+    # กึ่งกลางแนวตั้งของแถบ — เดิม hardcode y=12 ทำให้ตัวหนังสือลอยไม่ตรงกลาง
+    # ใช้ความสูงของตัวหนา วาดทั้งสองท่อนที่ y เดียวกัน เพื่อให้นั่งบนเส้นบรรทัดเดียวกัน
+    \$ty = (40 - \$sz.Height) / 2
+    \$e.Graphics.DrawString(\$name, \$fB, \$white, 30, \$ty, \$sf)
+    \$e.Graphics.DrawString("$bannerTail", \$fR, \$white, 30 + \$sz.Width, \$ty, \$sf)
     \$fB.Dispose(); \$fR.Dispose()
   })
 

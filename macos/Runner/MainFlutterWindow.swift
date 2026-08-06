@@ -720,6 +720,17 @@ enum RemoteConsent {
     for l in indicatorTimeLabels { l.stringValue = text }
   }
 
+  /// วาง label ให้อยู่กึ่งกลางแนวตั้งของแถบ
+  ///
+  /// AppKit ไม่มี vertical-align ให้ NSTextField — ถ้ากรอบสูงกว่าบรรทัด ตัวอักษรจะชิดบนเสมอ
+  /// จึงต้องวัดความสูงจริงของบรรทัดก่อน (`fittingSize` = ความสูงตามฟอนต์ที่ตั้งไว้ รวมส่วน
+  /// ที่ไทยใช้วางสระบน/ล่าง) แล้วค่อยคำนวณ y เอง
+  private static func centerVertically(_ field: NSTextField, x: CGFloat, width: CGFloat, in h: CGFloat) {
+    field.frame = NSRect(x: x, y: 0, width: width, height: h)
+    let lineH = field.fittingSize.height
+    field.frame = NSRect(x: x, y: (h - lineH) / 2, width: width, height: lineH)
+  }
+
   private static func makeBanner(on screen: NSScreen, viewer: String, controlling: Bool = false) -> NSWindow {
     let w: CGFloat = 470, h: CGFloat = 40
     let x = screen.frame.midX - w / 2
@@ -786,16 +797,18 @@ enum RemoteConsent {
 
     let label = NSTextField(labelWithString: "")
     label.attributedStringValue = msg
-    label.frame = NSRect(x: 31, y: 0, width: w - 176, height: h)
     label.alignment = .left
     label.backgroundColor = .clear
     label.isBezeled = false
     label.isEditable = false
     label.lineBreakMode = .byTruncatingTail
+    // ⚠️ NSTextField วาดตัวอักษร **ชิดบน** ของกรอบ ไม่ได้จัดกึ่งกลางแนวตั้งให้
+    // ตั้ง frame สูงเท่าแถบ (40) ตัวหนังสือจะลอยขึ้นบน — ต้องย่อกรอบเท่าความสูงจริง
+    // ของบรรทัดแล้ววางกึ่งกลางเอง (ดู centerVertically)
+    centerVertically(label, x: 31, width: w - 176, in: h)
     container.addSubview(label)
 
     let time = NSTextField(labelWithString: "00:00")
-    time.frame = NSRect(x: w - 145, y: 0, width: 44, height: h)
     time.alignment = .right
     time.textColor = NSColor.white.withAlphaComponent(0.85)
     // ตัวเลขความกว้างเท่ากัน ไม่งั้นแถบจะขยับซ้ายขวาทุกวินาทีตามความกว้างของเลข
@@ -803,6 +816,7 @@ enum RemoteConsent {
     time.backgroundColor = .clear
     time.isBezeled = false
     time.isEditable = false
+    centerVertically(time, x: w - 145, width: 44, in: h)
     container.addSubview(time)
     indicatorTimeLabels.append(time)
 
