@@ -522,6 +522,13 @@ class RemoteDisconnectTarget: NSObject {
 // ⚠️ แอปนี้เปิด App Sandbox อยู่ — ยังไม่ยืนยันว่า CGEventPost ทะลุ sandbox ได้จริงหรือไม่
 //    ถ้ายิงแล้วไม่มีผล ทั้งที่ AXIsProcessTrusted = true → แปลว่า sandbox บล็อก
 //    ต้องตัดสินใจว่าจะปิด sandbox ไหม (กระทบ USB Block ที่พึ่ง DiskArbitration ใน sandbox)
+/// ลายเซ็นที่ประทับลง event ทุกตัวที่ **เรายิงเข้าระบบเอง** (`eventSourceUserData`)
+///
+/// จำเป็นเพราะ "กด Esc ค้างเพื่อหยุด" บนแถบแจ้งเตือนดักคีย์ทั้งเครื่อง — ถ้าไม่แยก
+/// แอดมินที่กด Esc ค้างในโปรแกรมฝั่งเครื่องนี้ (เช่นออกจาก vim) จะตัด session ตัวเองทิ้ง
+/// โดยที่เจ้าของเครื่องไม่ได้แตะอะไรเลย
+let kMyarapInjectedTag: Int64 = 0x4D594152 // "MYAR"
+
 enum RemoteInput {
   /// พิกัดที่ viewer ส่งมาเป็นสัดส่วน 0..1 ของจอ ไม่ใช่ px
   /// เพราะ <video> ฝั่ง viewer ถูกย่อ/ขยายตามขนาด drawer — ส่ง px มาจะเพี้ยนทันทีที่ resize
@@ -548,6 +555,7 @@ enum RemoteInput {
   private static func post(_ type: CGEventType, _ pos: CGPoint, _ btn: CGMouseButton) {
     guard let ev = CGEvent(mouseEventSource: nil, mouseType: type,
                            mouseCursorPosition: pos, mouseButton: btn) else { return }
+    ev.setIntegerValueField(.eventSourceUserData, value: kMyarapInjectedTag)
     ev.post(tap: .cghidEventTap)
   }
 
@@ -579,6 +587,7 @@ enum RemoteInput {
     // หาร 40 เพราะ deltaY ของเบราว์เซอร์มักเป็น ~100/คลิก แต่ line ของ macOS ละเอียดกว่ามาก
     guard let ev = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2,
                            wheel1: Int32(-dy / 40), wheel2: Int32(-dx / 40), wheel3: 0) else { return }
+    ev.setIntegerValueField(.eventSourceUserData, value: kMyarapInjectedTag)
     ev.post(tap: .cghidEventTap)
   }
 
@@ -612,6 +621,7 @@ enum RemoteInput {
     if alt   { flags.insert(.maskAlternate) }
     if meta  { flags.insert(.maskCommand) }
     ev.flags = flags
+    ev.setIntegerValueField(.eventSourceUserData, value: kMyarapInjectedTag)
     ev.post(tap: .cghidEventTap)
   }
 }
@@ -622,6 +632,22 @@ enum RemoteConsent {
   // — เจอจริง: banner บน NSScreen.main จอเดียว โผล่ในภาพ Remote แต่ user มองอีกจอไม่เห็น)
   static var indicatorWindows: [NSWindow] = []
   static let disconnectTarget = RemoteDisconnectTarget() // retain เพื่อให้ปุ่มเรียกได้
+
+  // ── ตัวจับเวลา ────────────────────────────────────────────────────────────
+  // ผู้ใช้ต้องรู้ว่า "ถูกดูมานานแค่ไหนแล้ว" ไม่ใช่แค่ว่ากำลังถูกดู — แถบที่ไม่มีเวลา
+  // ทำให้แยกไม่ออกระหว่างเพิ่งเริ่มกับค้างมาครึ่งชั่วโมง
+  static var indicatorTimeLabels: [NSTextField] = []
+  static var indicatorTimer: Timer?
+  /// เวลาเริ่ม session — **ไม่รีเซ็ตตอนอัปเกรดจาก "ดู" เป็น "ควบคุม"** เพราะสิ่งที่ผู้ใช้
+  /// อยากรู้คือถูกยุ่งกับเครื่องมานานแค่ไหนทั้งหมด ไม่ใช่นับใหม่ทุกครั้งที่เปลี่ยนโหมด
+  static var indicatorStartedAt: Date?
+
+  // ── ทางออกฉุกเฉิน: กด Esc ค้าง 2 วินาที ──────────────────────────────────
+  // เฉพาะตอน **ถูกควบคุม** — ปุ่ม "หยุด" ต้องใช้เมาส์ ซึ่งตอนนั้นเมาส์อยู่ในมือคนอื่น
+  static var escMonitor: Any?
+  static var escDeadline: Timer?
+  private static let kEscKeyCode: UInt16 = 53
+  private static let kEscHoldSeconds: TimeInterval = 2.0
 
   // ถาม consent — คืน true = อนุญาต, false = ปฏิเสธ (modal, ต้องรันบน main thread)
   static func ask(viewer: String, result: @escaping FlutterResult) {
@@ -647,9 +673,13 @@ enum RemoteConsent {
       NSApp.activate(ignoringOtherApps: true)
       let alert = NSAlert()
       alert.messageText = "คำขอควบคุมเครื่องของคุณ"
-      alert.informativeText = "ผู้ดูแลระบบ \"\(viewer)\" ขอ**ควบคุมเมาส์และคีย์บอร์ด** ของเครื่องนี้\n\n"
+      // ⚠️ ห้ามใส่ `**...**` — NSAlert ไม่ render markdown จะโชว์ดอกจันดิบ ๆ ให้ผู้ใช้เห็น
+      alert.informativeText = "ผู้ดูแลระบบ \"\(viewer)\" ขอควบคุมเมาส์และคีย์บอร์ดของเครื่องนี้\n\n"
         + "ต่างจากการดูหน้าจอ — เมื่ออนุญาตแล้วเขาจะคลิกและพิมพ์บนเครื่องคุณได้จริง\n\n"
-        + "คุณหยุดได้ทุกเมื่อด้วยปุ่ม \"หยุด\" บนแถบแจ้งเตือนด้านบนจอ"
+        + "หยุดได้ทุกเมื่อ: กดปุ่ม “หยุด” บนแถบด้านบนจอ "
+        // ต้องบอกไว้ตรงนี้ ตอนที่ยังกดเมาส์เองได้ — พอถูกคุมแล้วเมาส์อยู่ในมือคนอื่น
+        // ถ้าไม่เคยรู้ว่ามีทางลัดนี้ ก็จะไม่มีทางหาเจอตอนที่ต้องใช้จริง
+        + "หรือกด Esc ค้าง 2 วินาที ถ้าเมาส์ใช้ไม่ได้"
       alert.alertStyle = .critical  // critical ไม่ใช่ warning — ความเสี่ยงสูงกว่าการดูเฉย ๆ
       alert.addButton(withTitle: "อนุญาตให้ควบคุม")
       alert.addButton(withTitle: "ปฏิเสธ")
@@ -658,21 +688,40 @@ enum RemoteConsent {
     }
   }
 
-  // แสดง banner แดงลอยด้านบน "ทุกจอ" (always-on-top) + ปุ่ม "หยุด" ให้ผู้ใช้ตัดการถูกดูเองได้
+  // แถบลอยด้านบน "ทุกจอ" (always-on-top) + ปุ่ม "หยุด" ให้ผู้ใช้ตัดการถูกดูเองได้
+  //
+  // สีแยกตามความรุนแรง: **ฟ้าเขียว = ถูกดู** · **แดง = ถูกควบคุม** — เดิมแดงเหมือนกันทั้งคู่
+  // ผู้ใช้จึงแยกไม่ออกว่าตอนนี้แค่ถูกมองอยู่ หรือมีคนกำลังคลิกและพิมพ์บนเครื่องจริง ๆ
   static func showIndicator(viewer: String, controlling: Bool = false) {
     DispatchQueue.main.async {
-      hideIndicatorNow()
+      let hadSession = indicatorStartedAt != nil
+      teardownIndicator()
+      if !hadSession { indicatorStartedAt = Date() } // เริ่มนับใหม่เฉพาะ session ใหม่จริง ๆ
       dlog("[MYARAP-RD] showIndicator screens=\(NSScreen.screens.count) controlling=\(controlling)")
       for screen in NSScreen.screens {
         dlog("[MYARAP-RD] banner on screen frame=\(screen.frame)")
         indicatorWindows.append(makeBanner(on: screen, viewer: viewer, controlling: controlling))
       }
       dlog("[MYARAP-RD] banners created=\(indicatorWindows.count)")
+
+      indicatorTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in tickIndicator() }
+      // .common ไม่งั้นเวลาจะหยุดเดินตอนผู้ใช้ลากหน้าต่าง/เปิดเมนู (run loop เปลี่ยน mode)
+      RunLoop.main.add(indicatorTimer!, forMode: .common)
+      tickIndicator()
+
+      if controlling { startEscWatch() }
     }
   }
 
+  private static func tickIndicator() {
+    guard let start = indicatorStartedAt else { return }
+    let s = Int(Date().timeIntervalSince(start))
+    let text = String(format: "%02d:%02d", s / 60, s % 60)
+    for l in indicatorTimeLabels { l.stringValue = text }
+  }
+
   private static func makeBanner(on screen: NSScreen, viewer: String, controlling: Bool = false) -> NSWindow {
-    let w: CGFloat = 440, h: CGFloat = 40
+    let w: CGFloat = 470, h: CGFloat = 40
     let x = screen.frame.midX - w / 2
     let y = screen.frame.maxY - h - 8 // ชิดบนใต้ menu bar ของจอนั้น
     let win = NSWindow(contentRect: NSRect(x: x, y: y, width: w, height: h),
@@ -682,31 +731,92 @@ enum RemoteConsent {
     win.backgroundColor = .clear
     win.ignoresMouseEvents = false // ต้องรับคลิกเพื่อกดปุ่มหยุด
     win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+    // เงาใต้แถบ (design: box-shadow 0 8px 22px -12px) — ต้องอยู่ที่ระดับ **หน้าต่าง**
+    // เพราะ container ตั้ง masksToBounds เพื่อ clip gradient ซึ่ง clip เงาไปด้วย
+    win.hasShadow = true
+
+    // สีหลักของโหมด — ใช้ทั้งพื้นไล่สีและสีตัวอักษรบนปุ่ม "หยุด"
+    let accent = controlling
+      ? NSColor(srgbRed: 0.70, green: 0.13, blue: 0.25, alpha: 1)   // #b3213f
+      : NSColor(srgbRed: 0.11, green: 0.56, blue: 0.64, alpha: 1)   // #1b8fa3
+    let accent2 = controlling
+      ? NSColor(srgbRed: 0.82, green: 0.23, blue: 0.36, alpha: 1)   // #d13a5c
+      : NSColor(srgbRed: 0.25, green: 0.71, blue: 0.79, alpha: 1)   // #3fb6c9
 
     let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
     container.wantsLayer = true
-    container.layer?.backgroundColor = NSColor(calibratedRed: 0.85, green: 0.12, blue: 0.25, alpha: 0.95).cgColor
-    container.layer?.cornerRadius = 8
+    container.layer?.cornerRadius = 9
+    container.layer?.masksToBounds = true
 
-    // ข้อความต้องแยกให้ชัดระหว่าง "ถูกดู" กับ "ถูกควบคุม" — ผู้ใช้ต้องรู้ว่ามีคนสั่งเมาส์/คีย์บอร์ดอยู่
-    let msg = controlling
-      ? "🔴  \(viewer) กำลัง**ควบคุม**เมาส์และคีย์บอร์ดเครื่องนี้"
-      : "🔴  หน้าจอกำลังถูกดูโดย \(viewer)"
-    let label = NSTextField(labelWithString: msg)
-    label.frame = NSRect(x: 14, y: 0, width: w - 110, height: h)
+    let grad = CAGradientLayer()
+    grad.frame = container.bounds
+    grad.startPoint = CGPoint(x: 0, y: 0.5)
+    grad.endPoint = CGPoint(x: 1, y: 0.5)
+    grad.colors = [accent.withAlphaComponent(0.97).cgColor,
+                   accent2.withAlphaComponent(0.97).cgColor]
+    container.layer?.addSublayer(grad)
+
+    // จุดขาวมีวงแหวนจาง ๆ รอบ (design: box-shadow 0 0 0 3px rgba(255,255,255,.28))
+    // ทำให้จุดอ่านออกบนพื้นไล่สี ไม่จมหายไปกับพื้น
+    let dot = NSView(frame: NSRect(x: 15, y: h / 2 - 3.5, width: 7, height: 7))
+    dot.wantsLayer = true
+    dot.layer?.backgroundColor = NSColor.white.cgColor
+    dot.layer?.cornerRadius = 3.5
+    dot.layer?.shadowColor = NSColor.white.cgColor
+    dot.layer?.shadowOpacity = 0.28
+    dot.layer?.shadowRadius = 0
+    dot.layer?.shadowOffset = .zero
+    // เงาแบบ "วงแหวน" ต้องกำหนด path เอง (ขยายกรอบออก 3px) — shadowRadius ให้ขอบฟุ้ง ไม่ใช่วงแหวนคม
+    dot.layer?.shadowPath = CGPath(ellipseIn: CGRect(x: -3, y: -3, width: 13, height: 13), transform: nil)
+    container.addSubview(dot)
+
+    // ชื่อคนดู **หนา** ส่วนคำอธิบายน้ำหนักปกติ — ให้สายตาจับ "ใคร" ได้ก่อน "กำลังทำอะไร"
+    // ⚠️ ห้ามใส่ `**...**` — NSTextField ไม่ render markdown มันจะโชว์ดอกจันดิบ ๆ (บั๊กเดิม)
+    let tail = controlling
+      ? " กำลังควบคุมเมาส์และคีย์บอร์ดของเครื่องนี้"
+      : " กำลังดูหน้าจอของคุณ"
+    let msg = NSMutableAttributedString(
+      string: viewer,
+      attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .bold),
+                   .foregroundColor: NSColor.white])
+    msg.append(NSAttributedString(
+      string: tail,
+      attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .regular),
+                   .foregroundColor: NSColor.white]))
+
+    let label = NSTextField(labelWithString: "")
+    label.attributedStringValue = msg
+    label.frame = NSRect(x: 31, y: 0, width: w - 176, height: h)
     label.alignment = .left
-    label.textColor = .white
-    label.font = .systemFont(ofSize: 13, weight: .semibold)
     label.backgroundColor = .clear
     label.isBezeled = false
     label.isEditable = false
     label.lineBreakMode = .byTruncatingTail
     container.addSubview(label)
 
+    let time = NSTextField(labelWithString: "00:00")
+    time.frame = NSRect(x: w - 145, y: 0, width: 44, height: h)
+    time.alignment = .right
+    time.textColor = NSColor.white.withAlphaComponent(0.85)
+    // ตัวเลขความกว้างเท่ากัน ไม่งั้นแถบจะขยับซ้ายขวาทุกวินาทีตามความกว้างของเลข
+    time.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+    time.backgroundColor = .clear
+    time.isBezeled = false
+    time.isEditable = false
+    container.addSubview(time)
+    indicatorTimeLabels.append(time)
+
+    // ปุ่มขาวตัวอักษรสีเดียวกับแถบ (design) — ปุ่มเทามาตรฐานของ macOS จมหายไปกับพื้นไล่สี
+    // จนผู้ใช้ไม่เห็นว่ามีทางออก ซึ่งเป็นสิ่งเดียวในแถบนี้ที่ต้องกดติดตั้งแต่ครั้งแรก
     let btn = NSButton(frame: NSRect(x: w - 92, y: 7, width: 80, height: 26))
-    btn.title = "หยุด"
-    btn.bezelStyle = .rounded
-    btn.font = .systemFont(ofSize: 12, weight: .semibold)
+    btn.isBordered = false
+    btn.wantsLayer = true
+    btn.layer?.backgroundColor = NSColor.white.cgColor
+    btn.layer?.cornerRadius = 6
+    btn.attributedTitle = NSAttributedString(
+      string: "หยุด",
+      attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                   .foregroundColor: accent])
     btn.target = disconnectTarget
     btn.action = #selector(RemoteDisconnectTarget.tapped)
     btn.keyEquivalent = ""
@@ -717,11 +827,55 @@ enum RemoteConsent {
     return win
   }
 
-  static func hideIndicator() {
-    DispatchQueue.main.async { hideIndicatorNow() }
+  // ── Esc ค้าง 2 วินาที = หยุดทันที ────────────────────────────────────────
+  //
+  // global monitor **ดักได้อย่างเดียว บล็อกไม่ได้** — Esc จะยังวิ่งไปถึงแอปที่ focus อยู่ด้วย
+  // ยอมรับได้ เพราะนี่คือทางออกฉุกเฉิน ไม่ใช่ shortcut ที่ใช้ประจำ
+  //
+  // ต้องมีสิทธิ์ Accessibility ซึ่ง**ได้มาแล้วแน่นอนตอนนี้** — การควบคุมใช้ CGEventPost
+  // ที่ต้องการสิทธิ์เดียวกัน ถ้าไม่ได้ก็คุมไม่ได้ตั้งแต่แรก
+  private static func startEscWatch() {
+    stopEscWatch()
+    escMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { ev in
+      guard ev.keyCode == kEscKeyCode else { return }
+      // ข้าม event ที่เรายิงเข้าไปเอง — ไม่งั้นแอดมินกด Esc ค้างในโปรแกรมฝั่งนี้แล้ว
+      // session ตัดตัวเองทิ้งโดยเจ้าของเครื่องไม่ได้ทำอะไรเลย
+      if ev.cgEvent?.getIntegerValueField(.eventSourceUserData) == kMyarapInjectedTag { return }
+      if ev.type == .keyDown {
+        guard escDeadline == nil else { return } // กดค้าง = keyDown ซ้ำ ๆ อย่านับใหม่
+        escDeadline = Timer.scheduledTimer(withTimeInterval: kEscHoldSeconds, repeats: false) { _ in
+          dlog("[MYARAP-RD] esc-hold → disconnect")
+          stopEscWatch()
+          disconnectTarget.tapped()
+        }
+      } else {
+        escDeadline?.invalidate()
+        escDeadline = nil
+      }
+    }
   }
 
-  private static func hideIndicatorNow() {
+  private static func stopEscWatch() {
+    escDeadline?.invalidate()
+    escDeadline = nil
+    if let m = escMonitor { NSEvent.removeMonitor(m) }
+    escMonitor = nil
+  }
+
+  /// จบ session จริง — ล้างเวลาเริ่มด้วย (ต่างจาก teardown ที่ใช้ตอนสร้างแถบใหม่)
+  static func hideIndicator() {
+    DispatchQueue.main.async {
+      teardownIndicator()
+      indicatorStartedAt = nil
+    }
+  }
+
+  /// รื้อแถบ+timer+monitor แต่ **คงเวลาเริ่มไว้** เพื่อให้สลับ ดู→ควบคุม แล้วเวลาเดินต่อ
+  private static func teardownIndicator() {
+    indicatorTimer?.invalidate()
+    indicatorTimer = nil
+    indicatorTimeLabels.removeAll()
+    stopEscWatch()
     for win in indicatorWindows { win.orderOut(nil) }
     indicatorWindows.removeAll()
   }

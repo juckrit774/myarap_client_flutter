@@ -1502,49 +1502,141 @@ if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY'
       return;
     }
     if (Platform.isWindows) {
-      // topmost banner form แบบ detached — แสดง "🔴 กำลังถูกดู" จนกว่าจะ kill process ตอน stop
-      // ⚠️ ไม่มีปุ่มหยุดโต้ตอบกลับ Dart (PowerShell form call กลับ Dart ไม่ได้) — Disconnect
-      //    ฝั่ง Windows agent = future; ปัจจุบันตัดได้จากฝั่ง admin เท่านั้น
-      final safeViewer = viewer.replaceAll('"', '');
+      // topmost banner form แบบ detached — ปิดตัวเองเมื่อผู้ใช้กด "หยุด" หรือกด Esc ค้าง
+      // แล้ว Dart รู้ผ่าน exitCode (PowerShell เรียกกลับ Dart ตรง ๆ ไม่ได้ จึงใช้การจบ process
+      // เป็นสัญญาณแทน — ดู `_onWindowsIndicatorClosed`)
+      //
+      // ⚠️ **ข้อจำกัดของ Esc ค้างบน Windows**: `GetAsyncKeyState` แยกไม่ออกว่า Esc มาจาก
+      // เจ้าของเครื่องหรือจาก `SendInput` ของฝั่งที่กำลังควบคุมอยู่ (ต่างจาก macOS ที่ประทับ
+      // ลายเซ็นลง CGEvent แล้วกรองออกได้) — แอดมินที่กด Esc ค้างในโปรแกรมฝั่งนี้จึงตัด
+      // session ตัวเองได้ · ผลลัพธ์คือ "หยุดการควบคุม" ซึ่งฝั่งปลอดภัย ไม่ใช่การเปิดสิทธิ์
+      // เพิ่ม จึงยอมรับไว้ก่อน · ทางแก้จริงต้องใช้ WH_KEYBOARD_LL อ่าน flag LLKHF_INJECTED
+      final safeViewer = viewer.replaceAll('"', '').replaceAll(r'$', '');
       // ผู้ใช้ต้องแยกออกว่า "ถูกดู" กับ "ถูกควบคุม" ต่างกัน — ไม่งั้นไม่รู้ว่ามีคนสั่ง
-      // เมาส์/คีย์บอร์ดอยู่ · ข้อความ+สีต่างกันชัด (แดง = ดู, ส้มเข้ม = ควบคุม)
-      final bannerText = controlling
-          ? "  * $safeViewer กำลังควบคุมเมาส์และคีย์บอร์ดเครื่องนี้"
-          : "  * หน้าจอกำลังถูกดูโดย $safeViewer";
-      final bannerRgb = controlling ? "196, 88, 0" : "217, 31, 64";
+      // เมาส์/คีย์บอร์ดอยู่ · **ฟ้าเขียว = ดู · แดง = ควบคุม** (เดิมแดง/ส้ม ซึ่งอ่านว่า
+      // "อันตรายทั้งคู่" แยกระดับความรุนแรงไม่ออก) — ชุดสีเดียวกับ macOS และ mockup
+      // ชื่อคนดูหนา ส่วนคำอธิบายน้ำหนักปกติ — วาดแยกกันใน Paint (ดู DrawString ข้างล่าง)
+      final bannerTail = controlling
+          ? " กำลังควบคุมเมาส์และคีย์บอร์ดของเครื่องนี้"
+          : " กำลังดูหน้าจอของคุณ";
+      final c1 = controlling ? "179, 33, 63" : "27, 143, 163";  // #b3213f / #1b8fa3
+      final c2 = controlling ? "209, 58, 92" : "63, 182, 201";  // #d13a5c / #3fb6c9
+      // Esc ค้าง = ทางออกฉุกเฉินตอนเมาส์อยู่ในมือคนอื่น — เปิดเฉพาะตอนถูกควบคุม
+      final escWatch = controlling ? r'$true' : r'$false';
       // form มีปุ่ม "หยุด" — คลิกแล้ว form ปิด → process exit (Dart ฟัง exitCode → disconnect)
       final script = '''
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-\$f = New-Object System.Windows.Forms.Form
-\$f.Text = "MYARAP Remote"
-\$f.FormBorderStyle = 'None'
-\$f.TopMost = \$true
-\$f.ShowInTaskbar = \$false
-\$f.StartPosition = 'Manual'
-\$sw = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
-\$f.Size = New-Object System.Drawing.Size(440, 40)
-\$f.Location = New-Object System.Drawing.Point([int](\$sw/2 - 220), 6)
-\$f.BackColor = [System.Drawing.Color]::FromArgb($bannerRgb)
-\$lbl = New-Object System.Windows.Forms.Label
-\$lbl.Text = "$bannerText"
-\$lbl.ForeColor = 'White'
-\$lbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-\$lbl.Location = New-Object System.Drawing.Point(0, 0)
-\$lbl.Size = New-Object System.Drawing.Size(330, 40)
-\$lbl.TextAlign = 'MiddleLeft'
-\$f.Controls.Add(\$lbl)
-\$btn = New-Object System.Windows.Forms.Button
-\$btn.Text = "หยุด"
-\$btn.Size = New-Object System.Drawing.Size(90, 28)
-\$btn.Location = New-Object System.Drawing.Point(340, 6)
-\$btn.FlatStyle = 'Flat'
-\$btn.BackColor = [System.Drawing.Color]::White
-\$btn.ForeColor = [System.Drawing.Color]::FromArgb($bannerRgb)
-\$btn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-\$btn.Add_Click({ \$f.Close() })
-\$f.Controls.Add(\$btn)
-[System.Windows.Forms.Application]::Run(\$f)
+# GetAsyncKeyState สำหรับดัก Esc ทั้งเครื่อง — form ไม่เคย focus จึงใช้ KeyDown ปกติไม่ได้
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class W32Key { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int k); }
+"@
+\$startedAt = Get-Date
+\$forms = @()
+\$timeLabels = @()
+\$stopping = \$false
+
+# แถบต้องขึ้น **ทุกจอ** — จอที่ถูก capture อาจไม่ใช่จอที่ผู้ใช้กำลังมองอยู่
+foreach (\$scr in [System.Windows.Forms.Screen]::AllScreens) {
+  \$f = New-Object System.Windows.Forms.Form
+  \$f.Text = "MYARAP Remote"
+  \$f.FormBorderStyle = 'None'
+  \$f.TopMost = \$true
+  \$f.ShowInTaskbar = \$false
+  \$f.StartPosition = 'Manual'
+  \$f.Size = New-Object System.Drawing.Size(470, 40)
+  \$f.Location = New-Object System.Drawing.Point(
+      [int](\$scr.Bounds.X + \$scr.Bounds.Width/2 - 235), [int](\$scr.Bounds.Y + 6))
+  \$f.BackColor = [System.Drawing.Color]::FromArgb($c1)
+
+  # มุมโค้ง 9px ตาม design — WinForms ไม่มี border-radius ต้องตัด Region เอง
+  \$gp = New-Object System.Drawing.Drawing2D.GraphicsPath
+  \$d = 18   # = radius * 2
+  \$gp.AddArc(0, 0, \$d, \$d, 180, 90)
+  \$gp.AddArc(470 - \$d, 0, \$d, \$d, 270, 90)
+  \$gp.AddArc(470 - \$d, 40 - \$d, \$d, \$d, 0, 90)
+  \$gp.AddArc(0, 40 - \$d, \$d, \$d, 90, 90)
+  \$gp.CloseFigure()
+  \$f.Region = New-Object System.Drawing.Region(\$gp)
+
+  # วาดเองทั้งพื้นไล่สี จุด และข้อความ — WinForms ไม่มี gradient/วงแหวน/ข้อความสองน้ำหนักในตัว
+  \$f.Add_Paint({
+    param(\$s, \$e)
+    \$e.Graphics.SmoothingMode = 'AntiAlias'
+    \$r = New-Object System.Drawing.Rectangle(0, 0, \$s.Width, \$s.Height)
+    \$b = New-Object System.Drawing.Drawing2D.LinearGradientBrush(\$r,
+        [System.Drawing.Color]::FromArgb($c1), [System.Drawing.Color]::FromArgb($c2), 0.0)
+    \$e.Graphics.FillRectangle(\$b, \$r)
+    \$b.Dispose()
+
+    # จุดขาว + วงแหวนจาง ให้อ่านออกบนพื้นไล่สี (design: box-shadow 0 0 0 3px rgba(255,255,255,.28))
+    \$halo = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(71, 255, 255, 255))
+    \$e.Graphics.FillEllipse(\$halo, 12, 13.5, 13, 13)
+    \$halo.Dispose()
+    \$white = [System.Drawing.Brushes]::White
+    \$e.Graphics.FillEllipse(\$white, 15, 16.5, 7, 7)
+
+    # ชื่อคนดูหนา + คำอธิบายปกติ — วัดความกว้างชื่อก่อนเพื่อวางส่วนที่เหลือต่อท้ายพอดี
+    \$sf = [System.Drawing.StringFormat]::GenericTypographic
+    \$fB = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+    \$fR = New-Object System.Drawing.Font('Segoe UI', 10)
+    \$name = "$safeViewer"
+    \$e.Graphics.DrawString(\$name, \$fB, \$white, 30, 12, \$sf)
+    \$nw = \$e.Graphics.MeasureString(\$name, \$fB, 1000, \$sf).Width
+    \$e.Graphics.DrawString("$bannerTail", \$fR, \$white, 30 + \$nw, 12, \$sf)
+    \$fB.Dispose(); \$fR.Dispose()
+  })
+
+  # ตัวจับเวลา — Consolas เพราะตัวเลขกว้างเท่ากัน แถบจะได้ไม่ขยับทุกวินาที
+  \$tl = New-Object System.Windows.Forms.Label
+  \$tl.Text = "00:00"
+  \$tl.ForeColor = 'White'
+  \$tl.BackColor = [System.Drawing.Color]::Transparent
+  \$tl.Font = New-Object System.Drawing.Font('Consolas', 9)
+  \$tl.Location = New-Object System.Drawing.Point(320, 0)
+  \$tl.Size = New-Object System.Drawing.Size(46, 40)
+  \$tl.TextAlign = 'MiddleRight'
+  \$f.Controls.Add(\$tl)
+  \$timeLabels += \$tl
+
+  \$btn = New-Object System.Windows.Forms.Button
+  \$btn.Text = "หยุด"
+  \$btn.Size = New-Object System.Drawing.Size(80, 28)
+  \$btn.Location = New-Object System.Drawing.Point(378, 6)
+  \$btn.FlatStyle = 'Flat'
+  \$btn.BackColor = [System.Drawing.Color]::White
+  \$btn.ForeColor = [System.Drawing.Color]::FromArgb($c1)
+  \$btn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+  \$btn.Add_Click({ [System.Windows.Forms.Application]::Exit() })
+  \$f.Controls.Add(\$btn)
+
+  \$forms += \$f
+}
+
+\$escHeldSince = \$null
+\$timer = New-Object System.Windows.Forms.Timer
+\$timer.Interval = 200
+\$timer.Add_Tick({
+  \$el = (Get-Date) - \$startedAt
+  \$txt = '{0:00}:{1:00}' -f [int]\$el.TotalMinutes, \$el.Seconds
+  foreach (\$t in \$timeLabels) { \$t.Text = \$txt }
+
+  if ($escWatch) {
+    # 0x1B = VK_ESCAPE · bit 15 = กดอยู่ตอนนี้
+    if ([W32Key]::GetAsyncKeyState(0x1B) -band 0x8000) {
+      if (\$null -eq \$script:escHeldSince) { \$script:escHeldSince = Get-Date }
+      elseif (((Get-Date) - \$script:escHeldSince).TotalSeconds -ge 2) {
+        [System.Windows.Forms.Application]::Exit()
+      }
+    } else { \$script:escHeldSince = \$null }
+  }
+})
+\$timer.Start()
+
+foreach (\$f in \$forms) { \$f.Show() }
+[System.Windows.Forms.Application]::Run()
 ''';
       try {
         // 🔴 ต้องปิด banner เดิมก่อนเสมอ — ไม่งั้นตอนขอควบคุมจะได้ banner ซ้อน 2 อัน
