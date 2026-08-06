@@ -1,0 +1,31 @@
+#ifndef RUNNER_REMOTE_BANNER_H_
+#define RUNNER_REMOTE_BANNER_H_
+
+#include <functional>
+#include <string>
+
+// แถบเตือน "กำลังถูกดู / กำลังถูกควบคุม" ของ Windows
+//
+// ⚠️ เดิมทำด้วยการ spawn PowerShell แล้วสร้าง WinForms — ซึ่ง**ไม่เคยขึ้นบนเครื่องจริงเลย**
+// และหาสาเหตุไม่ได้เพราะสคริปต์พังตอน runtime แบบเงียบ ๆ (compile C# ผ่าน Add-Type,
+// การ escape ข้ามชั้น Dart→PowerShell, overload resolution ของ GDI+) ทั้งหมดนี้ไม่มีอะไร
+// ที่ compiler จับได้ก่อนถึงมือผู้ใช้
+//
+// ย้ายมาเป็น Win32 ล้วนด้วยเหตุผลเดียว: **ถ้าเขียนผิด CI จะ build ไม่ผ่าน** ไม่ใช่เงียบ
+// แล้วผู้ใช้ถูกดูอยู่โดยไม่มีอะไรเตือน · โครงเดียวกับฝั่ง macOS ที่ทำ native อยู่แล้ว
+namespace remote_banner {
+
+// แสดงแถบบน **ทุกจอ** — จอที่ถูก capture อาจไม่ใช่จอที่ผู้ใช้กำลังมองอยู่
+// เรียกซ้ำได้: ของเดิมถูกปิดก่อนเสมอ และ **ตัวจับเวลาเดินต่อ** ไม่รีเซ็ต
+// (ผู้ใช้อยากรู้ว่าถูกยุ่งกับเครื่องมานานแค่ไหนทั้งหมด ไม่ใช่นับใหม่ตอนเปลี่ยนโหมด)
+void Show(const std::wstring& viewer, bool controlling);
+
+// ปิดแถบและล้างเวลาเริ่ม (จบ session จริง)
+void Hide();
+
+// ผู้ใช้กด "หยุด" หรือกด Esc ค้างครบ 2 วินาที
+void SetOnStop(std::function<void()> callback);
+
+}  // namespace remote_banner
+
+#endif  // RUNNER_REMOTE_BANNER_H_

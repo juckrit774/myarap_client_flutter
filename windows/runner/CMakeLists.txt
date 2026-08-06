@@ -9,6 +9,7 @@ project(runner LANGUAGES CXX)
 add_executable(${BINARY_NAME} WIN32
   "flutter_window.cpp"
   "main.cpp"
+  "remote_banner.cpp"
   "utils.cpp"
   "win32_window.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
@@ -29,6 +30,11 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_BUILD=${FLUTT
 
 # Disable Windows macros that collide with C++ standard library functions.
 target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
+
+# ⚠️ ซอร์สมีข้อความไทยทั้งใน comment และใน string literal (แถบเตือน remote)
+# MSVC อ่านไฟล์ที่ไม่มี BOM เป็น **codepage ของระบบ** ถ้าไม่บอก → ไทยกลายเป็น mojibake
+# ตอน build บน CI (runner เป็น locale อังกฤษ) โดยไม่มี error ให้เห็น
+target_compile_options(${BINARY_NAME} PRIVATE "/utf-8")
 
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.

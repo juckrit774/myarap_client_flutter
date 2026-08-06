@@ -59,11 +59,9 @@ class HomeViewModel extends ChangeNotifier {
   bool _remoteCapturing = false;
   bool _remoteConsentPending = false; // consent dialog กำลังเปิดอยู่ — กัน remote_start ซ้ำเด้ง popup ซ้อน
   String _remoteSessionId = ''; // session ที่กำลัง active (ใช้ตอนผู้ใช้กด Disconnect เอง)
-  Process? _winIndicatorProc;   // Windows: process ของ topmost banner form (kill ตอน stop)
-  // เดิมมี flag `_winIndicatorStopByUs` แยกว่า "เรา kill เอง" กับ "user กดปุ่มหยุด"
-  // แต่มี race: ตอนเปลี่ยน banner (ดู → ควบคุม) เรา kill ตัวเก่าแล้ว start ตัวใหม่ทันที
-  // exitCode ของตัวเก่ายิงทีหลังตอน flag ถูก reset แล้ว → ตัด session ทิ้งผิด ๆ
-  // → ใช้ **identity check กับ _winIndicatorProc** แทน (ดู proc.exitCode.then ข้างล่าง)
+  // เดิมมี `_winIndicatorProc` ถือ process ของ PowerShell ที่วาดแถบเตือนฝั่ง Windows
+  // ไว้ พร้อมกลไก identity check กัน race ตอนสลับแถบ — ลบทิ้งทั้งชุดแล้วเมื่อย้ายไป
+  // native (`windows/runner/remote_banner.cpp`) เพราะไม่มี process แยกให้ต้องดูแลอีก
 
   // WebRTC (low-latency upgrade) — สร้างเมื่อได้ SDP offer จาก viewer ผ่าน SSE
   RTCPeerConnection? _remotePc;
@@ -108,7 +106,6 @@ class HomeViewModel extends ChangeNotifier {
     _policyReconnect?.cancel();
     _remoteCaptureTimer?.cancel();
     _remoteEventSub?.cancel();
-    _winIndicatorProc?.kill();
     _stopWebrtc();
     _metricsTimer?.cancel();
     super.dispose();
@@ -132,6 +129,7 @@ class HomeViewModel extends ChangeNotifier {
     if (Platform.isMacOS) _listenUsbEventsMac();
     if (Platform.isWindows) _startWindowsUsbPolling();
     if (Platform.isMacOS) _listenRemoteEvents();
+    if (Platform.isWindows) _listenWindowsRemoteStop();
 
     await _authenticate();
 
@@ -1492,232 +1490,44 @@ if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY'
     return false;
   }
 
-    /// controlling=true → เปลี่ยนข้อความ indicator เป็น "กำลังถูกควบคุม"
+  /// controlling=true → เปลี่ยนข้อความ indicator เป็น "กำลังถูกควบคุม"
   /// ผู้ใช้ต้องแยกออกว่าตอนนี้ถูกดูเฉย ๆ หรือถูกสั่งงานเมาส์/คีย์บอร์ดจริง
+  ///
+  /// ⚠️ **เดิมฝั่ง Windows spawn PowerShell ไปสร้าง WinForms — ซึ่งไม่เคยขึ้นบนเครื่อง
+  /// จริงเลย** และหาสาเหตุไม่ได้เพราะพังตอน runtime แบบเงียบ ๆ (compile C# ผ่าน
+  /// Add-Type, การ escape ข้ามชั้น Dart→PowerShell, overload ของ GDI+) — ไม่มีอะไร
+  /// ที่ compiler จับได้ก่อนถึงมือผู้ใช้ · ตอนนี้ทั้งสองแพลตฟอร์มเรียก native ทางเดียวกัน
+  /// (`com.myarap/remote` → `showIndicator`) เขียนผิดแล้ว build ไม่ผ่านตั้งแต่ CI
   Future<void> _showRemoteIndicator(String viewer, {bool controlling = false}) async {
-    if (Platform.isMacOS) {
-      try {
-        await _remoteChannel.invokeMethod('showIndicator', {'viewer': viewer, 'controlling': controlling});
-      } catch (_) {}
-      return;
-    }
-    if (Platform.isWindows) {
-      // topmost banner form แบบ detached — ปิดตัวเองเมื่อผู้ใช้กด "หยุด" หรือกด Esc ค้าง
-      // แล้ว Dart รู้ผ่าน exitCode (PowerShell เรียกกลับ Dart ตรง ๆ ไม่ได้ จึงใช้การจบ process
-      // เป็นสัญญาณแทน — ดู `_onWindowsIndicatorClosed`)
-      //
-      // 🔴 **สคริปต์ล้ม = ตัด session ทิ้งด้วย** (catch แล้ว throw → exit code ไม่เป็น 0 →
-      // `_onWindowsIndicatorClosed` ยิง /remote/stop) — จงใจ เพราะถ้าเตือนผู้ใช้ไม่ได้
-      // ก็ไม่ควรแอบดูเขาต่อเงียบ ๆ · error เขียนลง `%TEMP%\myarap-banner.log`
-      // (เดิม error ถูกกลืนหมด แถบไม่ขึ้นแล้วไม่มีร่องรอยให้ตามเลยสักบรรทัด)
-      //
-      // ⚠️ **ข้อจำกัดของ Esc ค้างบน Windows**: `GetAsyncKeyState` แยกไม่ออกว่า Esc มาจาก
-      // เจ้าของเครื่องหรือจาก `SendInput` ของฝั่งที่กำลังควบคุมอยู่ (ต่างจาก macOS ที่ประทับ
-      // ลายเซ็นลง CGEvent แล้วกรองออกได้) — แอดมินที่กด Esc ค้างในโปรแกรมฝั่งนี้จึงตัด
-      // session ตัวเองได้ · ผลลัพธ์คือ "หยุดการควบคุม" ซึ่งฝั่งปลอดภัย ไม่ใช่การเปิดสิทธิ์
-      // เพิ่ม จึงยอมรับไว้ก่อน · ทางแก้จริงต้องใช้ WH_KEYBOARD_LL อ่าน flag LLKHF_INJECTED
-      final safeViewer = viewer.replaceAll('"', '').replaceAll(r'$', '');
-      // ผู้ใช้ต้องแยกออกว่า "ถูกดู" กับ "ถูกควบคุม" ต่างกัน — ไม่งั้นไม่รู้ว่ามีคนสั่ง
-      // เมาส์/คีย์บอร์ดอยู่ · **ฟ้าเขียว = ดู · แดง = ควบคุม** (เดิมแดง/ส้ม ซึ่งอ่านว่า
-      // "อันตรายทั้งคู่" แยกระดับความรุนแรงไม่ออก) — ชุดสีเดียวกับ macOS และ mockup
-      // ชื่อคนดูหนา ส่วนคำอธิบายน้ำหนักปกติ — วาดแยกกันใน Paint (ดู DrawString ข้างล่าง)
-      final bannerTail = controlling
-          ? " กำลังควบคุมเมาส์และคีย์บอร์ดของเครื่องนี้"
-          : " กำลังดูหน้าจอของคุณ";
-      final c1 = controlling ? "179, 33, 63" : "27, 143, 163";  // #b3213f / #1b8fa3
-      final c2 = controlling ? "209, 58, 92" : "63, 182, 201";  // #d13a5c / #3fb6c9
-      // Esc ค้าง = ทางออกฉุกเฉินตอนเมาส์อยู่ในมือคนอื่น — เปิดเฉพาะตอนถูกควบคุม
-      final escWatch = controlling ? r'$true' : r'$false';
-      // form มีปุ่ม "หยุด" — คลิกแล้ว form ปิด → process exit (Dart ฟัง exitCode → disconnect)
-      final script = '''
-\$ErrorActionPreference = 'Stop'
-# ถ้าแถบไม่ขึ้น ต้องมีร่องรอยให้ตามได้ — เดิม error ถูกกลืนหมด ไม่มีทางรู้ว่าพังตรงไหน
-\$log = Join-Path \$env:TEMP 'myarap-banner.log'
-function LogLine(\$m) { "\$(Get-Date -f 'HH:mm:ss') \$m" | Out-File -Append -Encoding utf8 \$log }
-try {
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-# ⚠️ Esc watcher ต้อง compile C# ตอนรัน (Add-Type) ซึ่งล้มได้ในหลายสภาพแวดล้อม —
-# ห่อ try/catch แยกเสมอ ไม่งั้นฟีเจอร์เสริมตัวนี้ทำให้ **แถบเตือนทั้งอันไม่ขึ้นเลย**
-# ซึ่งร้ายแรงกว่ามาก (ผู้ใช้ถูกดูอยู่โดยไม่มีอะไรบอก)
-\$canEsc = \$false
-try {
-  Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class W32Key { [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int k); }
-"@
-  \$canEsc = \$true
-} catch { LogLine "esc watcher ใช้ไม่ได้: \$_" }
-
-\$script:elapsed = '00:00'
-\$startedAt = Get-Date
-\$forms = @()
-
-\$fB = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-\$fR = New-Object System.Drawing.Font('Segoe UI', 10)
-\$fM = New-Object System.Drawing.Font('Consolas', 9)
-\$sfT = [System.Drawing.StringFormat]::GenericTypographic
-\$sfR = New-Object System.Drawing.StringFormat
-\$sfR.Alignment = 'Far'
-
-# แถบต้องขึ้น **ทุกจอ** — จอที่ถูก capture อาจไม่ใช่จอที่ผู้ใช้กำลังมองอยู่
-foreach (\$scr in [System.Windows.Forms.Screen]::AllScreens) {
-  \$f = New-Object System.Windows.Forms.Form
-  \$f.Text = 'MYARAP Remote'
-  \$f.FormBorderStyle = 'None'
-  \$f.TopMost = \$true
-  \$f.ShowInTaskbar = \$false
-  \$f.StartPosition = 'Manual'
-  \$f.Size = New-Object System.Drawing.Size(470, 40)
-  \$f.Location = New-Object System.Drawing.Point(
-      [int](\$scr.Bounds.X + \$scr.Bounds.Width / 2 - 235), [int](\$scr.Bounds.Y + 6))
-  \$f.BackColor = [System.Drawing.Color]::FromArgb($c1)
-
-  # มุมโค้ง 9px ตาม design — WinForms ไม่มี border-radius ต้องตัด Region เอง
-  \$gp = New-Object System.Drawing.Drawing2D.GraphicsPath
-  \$gp.AddArc(0, 0, 18, 18, 180, 90)
-  \$gp.AddArc(452, 0, 18, 18, 270, 90)
-  \$gp.AddArc(452, 22, 18, 18, 0, 90)
-  \$gp.AddArc(0, 22, 18, 18, 90, 90)
-  \$gp.CloseFigure()
-  \$f.Region = New-Object System.Drawing.Region(\$gp)
-
-  # วาดทุกอย่างเองใน Paint — ห้ามใช้ Label ทับพื้นไล่สี เพราะ WinForms ผสมสี "โปร่งใส"
-  # กับ BackColor ของ parent ไม่ใช่กับสิ่งที่วาดใน Paint → จะได้บล็อกสีทึบคาอยู่หลังตัวอักษร
-  \$f.Add_Paint({
-    param(\$s, \$e)
-    \$e.Graphics.SmoothingMode = 'AntiAlias'
-    \$r = New-Object System.Drawing.Rectangle(0, 0, \$s.Width, \$s.Height)
-    \$b = New-Object System.Drawing.Drawing2D.LinearGradientBrush(\$r,
-        [System.Drawing.Color]::FromArgb($c1), [System.Drawing.Color]::FromArgb($c2), 0.0)
-    \$e.Graphics.FillRectangle(\$b, \$r)
-    \$b.Dispose()
-
-    \$w = [System.Drawing.Brushes]::White
-    # จุดขาว + วงแหวนจาง (design: box-shadow 0 0 0 3px rgba(255,255,255,.28))
-    \$halo = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(71, 255, 255, 255))
-    \$e.Graphics.FillEllipse(\$halo, 12, 13, 14, 14)
-    \$halo.Dispose()
-    \$e.Graphics.FillEllipse(\$w, 15, 16, 8, 8)
-
-    # ชื่อคนดูหนา + คำอธิบายปกติ วาดที่ y เดียวกันให้นั่งบนเส้นบรรทัดเดียวกัน
-    # cast เป็น float ให้ครบทุกตัว — เลขปนระหว่าง int กับ double ทำให้ PowerShell
-    # เลือก overload ของ DrawString ไม่ได้แล้ว throw ทั้งที่โค้ดดูถูก
-    \$sz = \$e.Graphics.MeasureString('$safeViewer', \$script:fB, 1000, \$script:sfT)
-    \$ty = [float]((40 - \$sz.Height) / 2)
-    \$e.Graphics.DrawString('$safeViewer', \$script:fB, \$w, [float]30, \$ty, \$script:sfT)
-    \$e.Graphics.DrawString('$bannerTail', \$script:fR, \$w, [float](30 + \$sz.Width), \$ty, \$script:sfT)
-
-    # เวลา — วาดเองแทน Label ด้วยเหตุผลเรื่องความโปร่งใสข้างบน + อัปเดตด้วย Invalidate()
-    \$tr = New-Object System.Drawing.RectangleF([float]296, \$ty, [float]70, [float]20)
-    \$e.Graphics.DrawString(\$script:elapsed, \$script:fM, \$w, \$tr, \$script:sfR)
-  })
-
-  # ปุ่มขาวตัวอักษรสีเดียวกับแถบ — เป็นสิ่งเดียวในแถบที่ต้องกดติดตั้งแต่ครั้งแรก
-  \$btn = New-Object System.Windows.Forms.Button
-  \$btn.Text = 'หยุด'
-  \$btn.Size = New-Object System.Drawing.Size(80, 28)
-  \$btn.Location = New-Object System.Drawing.Point(378, 6)
-  \$btn.FlatStyle = 'Flat'
-  \$btn.FlatAppearance.BorderSize = 0
-  \$btn.BackColor = [System.Drawing.Color]::White
-  \$btn.ForeColor = [System.Drawing.Color]::FromArgb($c1)
-  \$btn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-  \$btn.Add_Click({ [System.Windows.Forms.Application]::Exit() })
-  \$f.Controls.Add(\$btn)
-
-  \$forms += \$f
-}
-
-\$script:fB = \$fB; \$script:fR = \$fR; \$script:fM = \$fM
-\$script:sfT = \$sfT; \$script:sfR = \$sfR
-\$script:escSince = \$null
-
-\$timer = New-Object System.Windows.Forms.Timer
-\$timer.Interval = 250
-\$timer.Add_Tick({
-  \$el = (Get-Date) - \$script:startedAt
-  \$script:elapsed = '{0:00}:{1:00}' -f [int]\$el.TotalMinutes, \$el.Seconds
-  foreach (\$x in \$script:forms) { \$x.Invalidate() }
-
-  if (\$script:watchEsc) {
-    # 0x1B = VK_ESCAPE · bit 15 = กดอยู่ตอนนี้
-    if ([W32Key]::GetAsyncKeyState(0x1B) -band 0x8000) {
-      if (\$null -eq \$script:escSince) { \$script:escSince = Get-Date }
-      elseif (((Get-Date) - \$script:escSince).TotalSeconds -ge 2) {
-        LogLine 'esc ค้างครบ 2 วินาที → ปิดแถบ'
-        [System.Windows.Forms.Application]::Exit()
-      }
-    } else { \$script:escSince = \$null }
-  }
-})
-
-\$script:startedAt = \$startedAt
-\$script:forms = \$forms
-\$script:watchEsc = ($escWatch -and \$canEsc)
-\$timer.Start()
-foreach (\$f in \$forms) { \$f.Show() }
-LogLine "แถบขึ้นแล้ว \$(\$forms.Count) จอ (esc=\$(\$script:watchEsc))"
-[System.Windows.Forms.Application]::Run()
-} catch {
-  LogLine "แถบไม่ขึ้น: \$_"
-  throw
-}
-''';
-      try {
-        // 🔴 ต้องปิด banner เดิมก่อนเสมอ — ไม่งั้นตอนขอควบคุมจะได้ banner ซ้อน 2 อัน
-        // (อันเดิม "กำลังถูกดู" + อันใหม่ "กำลังควบคุม") แล้วพอหยุด จะหายไปแค่อันเดียว
-        // เพราะ _winIndicatorProc ถูกเขียนทับ ทำให้ไม่มี reference ไป kill ตัวเก่า
-        // macOS ไม่เจอปัญหานี้เพราะ showIndicator เรียก hideIndicatorNow() ก่อนเสมอ
-        final old = _winIndicatorProc;
-        _winIndicatorProc = null; // ตัดสิทธิ์ตัวเก่าก่อน kill (ดู guard ใน exitCode ข้างล่าง)
-        old?.kill();
-
-        // ไม่ await — form.Run บล็อกจนกว่า process ถูก kill หรือ user กดปุ่มหยุด
-        final proc = await Process.start('powershell', _psArgs(script, hidden: true));
-        _winIndicatorProc = proc;
-        // ฟัง exit: ถ้า process จบเองโดยเราไม่ได้ kill = user กดปุ่มหยุด → disconnect
-        //
-        // ⚠️ เทียบ identity กับ _winIndicatorProc ปัจจุบัน **แทนการใช้ flag รวม**
-        // เพราะ flag มี race: ตอนเปลี่ยน banner เรา kill ตัวเก่าแล้ว start ตัวใหม่ทันที
-        // exitCode ของตัวเก่า (async) อาจยิงหลังจากที่ flag ถูก reset เป็น false ไปแล้ว
-        // → เข้าใจผิดว่า user กดปุ่มหยุด → ตัด session ทิ้งทั้งที่ผู้ใช้ไม่ได้ทำอะไร
-        proc.exitCode.then((_) {
-          if (!identical(_winIndicatorProc, proc)) return; // ถูกแทนที่ไปแล้ว = เราปิดเอง
-          _onWindowsIndicatorClosed();
-        });
-      } catch (_) {}
-      return;
-    }
-  }
-
-  // Windows: indicator form ปิด (user กดปุ่มหยุด) → หยุด capture + แจ้ง backend จบ session
-  /// เรียกเฉพาะเมื่อ **ผู้ใช้กดปุ่มหยุดเอง** — ผู้เรียก (exitCode handler) กรอง
-  /// กรณีที่เรา kill เองออกไปแล้วด้วย identity check
-  void _onWindowsIndicatorClosed() {
-    _winIndicatorProc = null;
-    final sid = _remoteSessionId;
-    _remoteCaptureTimer?.cancel();
-    _remoteCaptureTimer = null;
-    _remoteSessionId = '';
-    if (sid.isNotEmpty) {
-      NetworkManager.instance
-          .postV3('/v3/api/device/remote/stop', {'sessionId': sid})
-          .catchError((_) => <String, dynamic>{});
-    }
+    if (!Platform.isMacOS && !Platform.isWindows) return;
+    try {
+      await _remoteChannel
+          .invokeMethod('showIndicator', {'viewer': viewer, 'controlling': controlling});
+    } catch (_) {}
   }
 
   void _hideRemoteIndicator() {
-    if (Platform.isMacOS) {
-      _remoteChannel.invokeMethod('hideIndicator').catchError((_) => null);
-    } else if (Platform.isWindows) {
-      // ตั้ง null **ก่อน** kill — exitCode handler เช็ค identity แล้วจะรู้เองว่าเราปิด
-      final proc = _winIndicatorProc;
-      _winIndicatorProc = null;
-      proc?.kill();
-    }
+    if (!Platform.isMacOS && !Platform.isWindows) return;
+    _remoteChannel.invokeMethod('hideIndicator').catchError((_) => null);
+  }
+
+  /// native ฝั่ง Windows แจ้งกลับว่าผู้ใช้กด "หยุด" บนแถบ หรือกด Esc ค้างครบ
+  ///
+  /// macOS ใช้ EventChannel (`_listenRemoteEvents`) ทำงานเดียวกัน — Windows ไม่มี
+  /// EventChannel จึงให้ native เรียก method สวนกลับมาแทน
+  void _listenWindowsRemoteStop() {
+    _remoteChannel.setMethodCallHandler((call) async {
+      if (call.method != 'remoteStopByUser') return null;
+      final sid = _remoteSessionId;
+      _stopRemoteCapture();
+      if (sid.isNotEmpty) {
+        try {
+          await NetworkManager.instance
+              .postV3('/v3/api/device/remote/stop', {'sessionId': sid});
+        } catch (_) {}
+      }
+      return null;
+    });
   }
 
   // ผู้ใช้ปลายทางกด "หยุด" บน indicator → หยุด capture + แจ้ง backend จบ session (viewer จะเห็นว่าจบ)

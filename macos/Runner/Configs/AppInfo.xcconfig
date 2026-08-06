@@ -16,7 +16,7 @@ PRODUCT_NAME = MyARAP
 // แต่ฝั่ง Windows ใช้ MSI ProductVersion 4 ท่อน — ต้องให้ตรงกันไม่งั้น inventory
 // รายงานคนละเวอร์ชันสำหรับ agent ตัวเดียวกัน
 // ⚠️ bump ที่นี่ให้ตรงกับ installer/product.wxs ทุกครั้ง
-MYARAP_DISPLAY_VERSION = 1.0.0.13
+MYARAP_DISPLAY_VERSION = 1.0.0.14
 
 // The application's bundle identifier
 PRODUCT_BUNDLE_IDENTIFIER = com.myarap.myarap
