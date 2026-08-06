@@ -397,6 +397,14 @@ class DeviceDetail {
     // แต่ละรายการติด `source` = user | system | store เพื่อให้ backend แยกของที่มากับ OS
     // ออกจากของที่คนลงเอง (ไม่งั้นยอด Unclassified บวมด้วย VC++ Redist/Windows components)
     // และติด `publisher` จาก registry Publisher (มีมาแต่เดิมแต่ agent ไม่เคยส่ง)
+    //
+    // ⚠️ **Appx ใช้ `SignatureKind` ตัดสิน ห้ามเดาจากชื่อ/publisher** (แก้ 2026-08-06)
+    // ของเดิมเดาจากชื่อ (`Microsoft.Windows*` / `Microsoft.UI*` / …) ซึ่งพลาดเยอะมาก —
+    // `Microsoft.BingNews` ที่ preinstall มามี publisher เป็น "Microsoft Corporation"
+    // เหมือน MSTeams ที่คนลงเองเป๊ะ แยกไม่ออก · ผลคือ Appx ที่มากับ Windows ~60 ตัว
+    // หลุดไปเป็น `store` แล้วไปโผล่ในยอด Unclassified
+    // `SignatureKind` เป็นการจำแนกของ Windows เอง: System = มากับ OS · Store/Developer/
+    // Enterprise = คนลงเอง
     const script = r'''
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -495,9 +503,12 @@ $apps += @(Get-AppxPackage -ErrorAction SilentlyContinue |
         version   = $_.Version.ToString()
         size      = 0
         publisher = if ($_.Publisher) { ($_.Publisher -replace '^CN=([^,]+).*$', '$1').Trim() } else { '' }
-        # bundled Windows components -> system, anything else -> store
-        source    = if ($dn -like 'Microsoft.Windows*' -or $dn -like 'Microsoft.UI*' -or
-                        $dn -like 'Microsoft.VCLibs*' -or $dn -like 'Microsoft.NET*') { 'system' } else { 'store' }
+        # SignatureKind is Windows' own classification - System = shipped with the OS.
+        # Store / Developer / Enterprise = someone chose to install it.
+        # Do NOT guess from the package name or publisher: preinstalled apps such as
+        # Microsoft.BingNews carry publisher "Microsoft Corporation" exactly like
+        # user-installed ones (MSTeams), so the name/publisher tells us nothing.
+        source    = if ($_.SignatureKind -eq 'System') { 'system' } else { 'store' }
       }
     }
   })
