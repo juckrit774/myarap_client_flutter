@@ -59,6 +59,9 @@ class HomeViewModel extends ChangeNotifier {
   bool _remoteCapturing = false;
   bool _remoteConsentPending = false; // consent dialog กำลังเปิดอยู่ — กัน remote_start ซ้ำเด้ง popup ซ้อน
   String _remoteSessionId = ''; // session ที่กำลัง active (ใช้ตอนผู้ใช้กด Disconnect เอง)
+  /// process ของแถบทางสำรอง (PowerShell) — ใช้เฉพาะตอน native ไม่ขึ้น
+  Process? _legacyBannerProc;
+
   // เดิมมี `_winIndicatorProc` ถือ process ของ PowerShell ที่วาดแถบเตือนฝั่ง Windows
   // ไว้ พร้อมกลไก identity check กัน race ตอนสลับแถบ — ลบทิ้งทั้งชุดแล้วเมื่อย้ายไป
   // native (`windows/runner/remote_banner.cpp`) เพราะไม่มี process แยกให้ต้องดูแลอีก
@@ -106,6 +109,7 @@ class HomeViewModel extends ChangeNotifier {
     _policyReconnect?.cancel();
     _remoteCaptureTimer?.cancel();
     _remoteEventSub?.cancel();
+    _legacyBannerProc?.kill();
     _stopWebrtc();
     _metricsTimer?.cancel();
     super.dispose();
@@ -504,6 +508,7 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
 
     switch (m['type']) {
       case 'remote_start':
+        _rlog('SSE remote_start มาถึงแล้ว');
         _onRemoteStart(m['sessionId'] as String? ?? '', m['by'] as String? ?? 'ผู้ดูแลระบบ');
         break;
       case 'remote_offer':
@@ -513,6 +518,7 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
         _stopRemoteCapture();
         break;
       case 'remote_control_request':
+        _rlog('SSE remote_control_request มาถึงแล้ว');
         _onRemoteControlRequest(
             m['sessionId'] as String? ?? '', m['by'] as String? ?? 'ผู้ดูแลระบบ');
         break;
@@ -1028,11 +1034,18 @@ $result | ConvertTo-Json -Compress -Depth 4
   // admin เปิด Remote → ขอ consent ก่อน (ผู้ใช้ต้องกดอนุญาต) → ค่อยเริ่ม capture + แสดง indicator
   Future<void> _onRemoteStart(String sessionId, String viewer) async {
     if (!Platform.isMacOS && !Platform.isWindows) return;
-    if (_remoteCaptureTimer != null) return; // มี session active อยู่แล้ว
+    if (_remoteCaptureTimer != null) {
+      _rlog('ข้าม — มี session ค้างอยู่แล้ว (capture timer ยังเดิน)');
+      return;
+    }
     // กัน consent popup ซ้ำ: ถ้ากำลังถาม consent ค้างอยู่ (ยังไม่กดตอบ) แล้ว backend push
     // remote_start ซ้ำ (replay ตอน stream reconnect / session ค้าง) — ไม่เด้ง dialog อันที่สอง
-    if (_remoteConsentPending) return;
+    if (_remoteConsentPending) {
+      _rlog('ข้าม — กำลังรอผู้ใช้ตอบ consent อยู่');
+      return;
+    }
     _remoteConsentPending = true;
+    _rlog('ถาม consent…');
     final bool accept;
     try {
       accept = await _requestRemoteConsent(viewer);
@@ -1044,6 +1057,7 @@ $result | ConvertTo-Json -Compress -Depth 4
       await NetworkManager.instance.postV3(
           '/v3/api/device/remote/consent', {'sessionId': sessionId, 'accept': accept});
     } catch (_) {}
+    _rlog('ผล consent = ${accept ? "อนุญาต" : "ปฏิเสธ"}');
     if (!accept) return; // ปฏิเสธ → ไม่ capture
     _remoteSessionId = sessionId;
     await _showRemoteIndicator(viewer);
@@ -1490,6 +1504,22 @@ if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY'
     return false;
   }
 
+  /// บันทึกลำดับเหตุการณ์ของ remote ลงไฟล์ — `%TEMP%\myarap-remote.log` บน Windows
+  ///
+  /// จำเป็นเพราะ agent รันโดยไม่มี console ให้ดู และเส้นทางนี้ **กลืน exception
+  /// ทุกจุด** (`catch (_) {}`) เวลาแถบไม่ขึ้นจึงไม่เหลือร่องรอยเลยสักบรรทัดว่า
+  /// หยุดตรงไหน — เดาสาเหตุกันมาแล้วหลายรอบเพราะไม่มีข้อมูลตรงนี้
+  void _rlog(String msg) {
+    debugPrint('[REMOTE] $msg');
+    try {
+      final f = File('${Directory.systemTemp.path}${Platform.pathSeparator}myarap-remote.log');
+      f.writeAsStringSync('${DateTime.now().toIso8601String()}  $msg\n',
+          mode: FileMode.append);
+    } catch (_) {
+      // เขียน log ไม่ได้ต้องไม่ทำให้ flow จริงพัง
+    }
+  }
+
   /// controlling=true → เปลี่ยนข้อความ indicator เป็น "กำลังถูกควบคุม"
   /// ผู้ใช้ต้องแยกออกว่าตอนนี้ถูกดูเฉย ๆ หรือถูกสั่งงานเมาส์/คีย์บอร์ดจริง
   ///
@@ -1500,15 +1530,87 @@ if (\$r -eq [System.Windows.Forms.DialogResult]::Yes) { 'ACCEPT' } else { 'DENY'
   /// (`com.myarap/remote` → `showIndicator`) เขียนผิดแล้ว build ไม่ผ่านตั้งแต่ CI
   Future<void> _showRemoteIndicator(String viewer, {bool controlling = false}) async {
     if (!Platform.isMacOS && !Platform.isWindows) return;
+    _rlog('showIndicator → native (viewer=$viewer controlling=$controlling)');
+    int? shown;
     try {
-      await _remoteChannel
-          .invokeMethod('showIndicator', {'viewer': viewer, 'controlling': controlling});
-    } catch (_) {}
+      // native คืนจำนวนหน้าต่างที่สร้างได้ (Windows) — macOS คืน null
+      shown = await _remoteChannel.invokeMethod<int>(
+          'showIndicator', {'viewer': viewer, 'controlling': controlling});
+      _rlog('showIndicator สำเร็จ — หน้าต่างที่สร้างได้ = ${shown ?? 'n/a'}');
+    } catch (e) {
+      // ⚠️ เดิม `catch (_) {}` เฉย ๆ — MissingPluginException หรือ error จาก native
+      // หายไปเงียบ ๆ ทำให้แถบไม่ขึ้นแล้วหาสาเหตุไม่เจอ
+      _rlog('showIndicator ล้มเหลว: $e');
+    }
+
+    // ทางสำรองของ Windows — ถ้า native ไม่ได้ผล ย้อนไปใช้สคริปต์ตัวเดิมที่
+    // **ผู้ใช้ยืนยันว่าเคยขึ้นจริง** ดีกว่าปล่อยให้ถูกดูโดยไม่มีอะไรเตือนเลย
+    // (ตัวเดิมไม่มีเวลา/Esc และขึ้นจอเดียว แต่หน้าที่หลักคือ "บอกว่ากำลังถูกดู" ครบ)
+    if (Platform.isWindows && (shown == null || shown == 0)) {
+      _rlog('native ไม่ขึ้น → ใช้ทางสำรอง PowerShell แบบเดิม');
+      await _showLegacyWindowsBanner(viewer, controlling);
+    }
+  }
+
+  /// แถบแบบเดิมก่อน 2026-08-06 — เก็บไว้เป็นทางสำรองเท่านั้น
+  ///
+  /// เจตนา: สคริปต์นี้ **สั้นและพิสูจน์แล้วว่าทำงานบนเครื่องผู้ใช้จริง** ห้ามใส่ของใหม่
+  /// เข้าไปอีก (ที่พังรอบก่อนคือใส่ `Add-Type` compile C# เข้ามาแล้วสคริปต์ตายทั้งอัน)
+  Future<void> _showLegacyWindowsBanner(String viewer, bool controlling) async {
+    final safeViewer = viewer.replaceAll('"', '');
+    final bannerText = controlling
+        ? "  * $safeViewer กำลังควบคุมเมาส์และคีย์บอร์ดเครื่องนี้"
+        : "  * หน้าจอกำลังถูกดูโดย $safeViewer";
+    final bannerRgb = controlling ? "179, 33, 63" : "27, 143, 163";
+    final script = '''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+\$f = New-Object System.Windows.Forms.Form
+\$f.Text = "MYARAP Remote"
+\$f.FormBorderStyle = 'None'
+\$f.TopMost = \$true
+\$f.ShowInTaskbar = \$false
+\$f.StartPosition = 'Manual'
+\$sw = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
+\$f.Size = New-Object System.Drawing.Size(440, 40)
+\$f.Location = New-Object System.Drawing.Point([int](\$sw/2 - 220), 6)
+\$f.BackColor = [System.Drawing.Color]::FromArgb($bannerRgb)
+\$lbl = New-Object System.Windows.Forms.Label
+\$lbl.Text = "$bannerText"
+\$lbl.ForeColor = 'White'
+\$lbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+\$lbl.Location = New-Object System.Drawing.Point(0, 0)
+\$lbl.Size = New-Object System.Drawing.Size(330, 40)
+\$lbl.TextAlign = 'MiddleLeft'
+\$f.Controls.Add(\$lbl)
+\$btn = New-Object System.Windows.Forms.Button
+\$btn.Text = "หยุด"
+\$btn.Size = New-Object System.Drawing.Size(90, 28)
+\$btn.Location = New-Object System.Drawing.Point(340, 6)
+\$btn.FlatStyle = 'Flat'
+\$btn.BackColor = [System.Drawing.Color]::White
+\$btn.ForeColor = [System.Drawing.Color]::FromArgb($bannerRgb)
+\$btn.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+\$btn.Add_Click({ \$f.Close() })
+\$f.Controls.Add(\$btn)
+[System.Windows.Forms.Application]::Run(\$f)
+''';
+    try {
+      _legacyBannerProc?.kill();
+      _legacyBannerProc = await Process.start('powershell', _psArgs(script, hidden: true));
+      _rlog('ทางสำรองเริ่มแล้ว (pid=${_legacyBannerProc?.pid})');
+    } catch (e) {
+      _rlog('ทางสำรองก็ล้มเหลว: $e');
+    }
   }
 
   void _hideRemoteIndicator() {
     if (!Platform.isMacOS && !Platform.isWindows) return;
     _remoteChannel.invokeMethod('hideIndicator').catchError((_) => null);
+    // ต้องปิดทางสำรองด้วย ไม่งั้นแถบเก่าค้างบนจอหลังจบ session
+    final proc = _legacyBannerProc;
+    _legacyBannerProc = null;
+    proc?.kill();
   }
 
   /// native ฝั่ง Windows แจ้งกลับว่าผู้ใช้กด "หยุด" บนแถบ หรือกด Esc ค้างครบ

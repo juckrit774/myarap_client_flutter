@@ -76,8 +76,9 @@ bool FlutterWindow::OnCreate() {
               }
             }
           }
-          remote_banner::Show(Utf8ToWide(viewer), controlling);
-          result->Success();
+          const int shown = remote_banner::Show(Utf8ToWide(viewer), controlling);
+          // คืนจำนวนหน้าต่างให้ Dart บันทึกไว้ — 0 = เรียกถึงแล้วแต่สร้างไม่ได้
+          result->Success(flutter::EncodableValue(shown));
         } else if (call.method_name() == "hideIndicator") {
           remote_banner::Hide();
           result->Success();

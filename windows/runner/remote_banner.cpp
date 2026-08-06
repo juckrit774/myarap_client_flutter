@@ -270,7 +270,7 @@ void DestroyAll() {
 
 }  // namespace
 
-void Show(const std::wstring& viewer, bool controlling) {
+int Show(const std::wstring& viewer, bool controlling) {
   auto& s = S();
   const bool had_session = s.started_at != 0;
   DestroyAll();
@@ -280,6 +280,7 @@ void Show(const std::wstring& viewer, bool controlling) {
   s.esc_down_since = 0;
   if (!had_session) s.started_at = GetTickCount64();
   EnumDisplayMonitors(nullptr, nullptr, AddBannerForMonitor, 0);
+  return static_cast<int>(s.windows.size());
 }
 
 void Hide() {
