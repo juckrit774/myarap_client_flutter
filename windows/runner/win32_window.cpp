@@ -229,6 +229,18 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       return 0;
 
+    case WM_GETMINMAXINFO: {
+      // UI แบบคอนโซล (เมนูซ้าย + รายการ + รายละเอียด) ต้องการความกว้างขั้นต่ำ —
+      // ย่อกว่านี้แผงรายละเอียดจะแคบจนปุ่มล้นกรอบ (เจอจริงบน macOS ตอนหน้าต่างกว้าง 800)
+      // ต้องคูณ DPI เองเหมือนตอน CreateWindow ไม่งั้นบนจอ scale 150% จะได้ขั้นต่ำเล็กเกินจริง
+      UINT dpi = FlutterDesktopGetDpiForHWND(hwnd);
+      double scale_factor = dpi / 96.0;
+      auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+      info->ptMinTrackSize.x = Scale(1024, scale_factor);
+      info->ptMinTrackSize.y = Scale(640, scale_factor);
+      return 0;
+    }
+
     case WM_DPICHANGED: {
       auto newRectSize = reinterpret_cast<RECT*>(lparam);
       LONG newWidth = newRectSize->right - newRectSize->left;
