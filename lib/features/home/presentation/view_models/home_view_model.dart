@@ -38,6 +38,10 @@ class HomeViewModel extends ChangeNotifier {
   // USB block policy — จาก allowUsb ที่ backend ส่งกลับใน response ของ PUT /v3/api/device
   // default = true (ไม่บล็อก) จนกว่าจะได้ policy จริงจาก heartbeat แรก
   bool _allowUsb = true;
+
+  /// นโยบาย USB ที่ backend สั่งมา — หน้า "เครื่องของฉัน" ใช้แสดงให้ผู้ใช้รู้ว่า
+  /// ทำไมเสียบ thumbdrive แล้วไม่ขึ้น (เดิมไม่มีอะไรบอกเลย ผู้ใช้นึกว่าเครื่องเสีย)
+  bool get usbAllowed => _allowUsb;
   Timer? _usbPollTimer;
   Set<String> _knownUsbDrives = {};
   static const _usbEventChannel = EventChannel('com.myarap/usb_events');

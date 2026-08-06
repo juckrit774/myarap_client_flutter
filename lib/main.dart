@@ -57,6 +57,27 @@ class MyarapApp extends StatefulWidget {
   State<MyarapApp> createState() => _MyarapAppState();
 }
 
+/// ThemeData จาก palette เดียว — ให้สว่าง/มืดใช้โครงเดียวกัน ต่างแค่ค่าสี
+ThemeData _theme(AppPalette c) => ThemeData(
+      useMaterial3: true,
+      brightness: c.isDark ? Brightness.dark : Brightness.light,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: AppColors.violet,
+        primary: c.violet,
+        surface: c.card,
+        brightness: c.isDark ? Brightness.dark : Brightness.light,
+      ),
+      scaffoldBackgroundColor: c.bg,
+      dividerColor: c.line,
+      cardTheme: const CardThemeData(elevation: 0, margin: EdgeInsets.zero),
+      // แบบ A ไม่มี app bar แล้ว (ใช้เมนูซ้ายแทน) — เหลือไว้เผื่อ dialog/หน้าต่างย่อย
+      appBarTheme: AppBarTheme(
+        backgroundColor: c.card,
+        foregroundColor: c.ink,
+        elevation: 0,
+      ),
+    );
+
 class _MyarapAppState extends State<MyarapApp> with WindowListener, TrayListener {
   static const _windowChannel = MethodChannel('com.myarap/window');
 
@@ -133,22 +154,10 @@ class _MyarapAppState extends State<MyarapApp> with WindowListener, TrayListener
       navigatorKey: _navigatorKey,
       title: AppConfig.appName,
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: AppColors.mainPurple,
-          primary: AppColors.mainPurple,
-        ),
-        useMaterial3: true,
-        scaffoldBackgroundColor: AppColors.bgColor,
-        cardTheme: const CardThemeData(
-          elevation: 0,
-          margin: EdgeInsets.zero,
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: AppColors.deepPurple,
-          foregroundColor: Colors.white,
-        ),
-      ),
+      // ตามโหมดของระบบปฏิบัติการ — โปรแกรมค้างบนเครื่องทั้งวัน ควรกลืนกับ OS
+      themeMode: ThemeMode.system,
+      theme: _theme(AppColors.light),
+      darkTheme: _theme(AppColors.dark),
       home: const HomeScreen(),
     );
   }
