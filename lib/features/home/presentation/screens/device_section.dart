@@ -30,8 +30,8 @@ class DeviceSection extends StatelessWidget {
       children: [
         SectionHeader(
           title: 'เครื่องของฉัน',
-          subtitle: vm.assetNo.isEmpty ? null : vm.assetNo,
-          trailing: Row(children: [
+          subtitle: vm.isRegistered ? vm.assetNo : null,
+          trailing: Row(mainAxisSize: MainAxisSize.min, children: [
             StatusPill(
               vm.updateErrorMessage == null ? 'เชื่อมต่อแล้ว' : 'ติดต่อเซิร์ฟเวอร์ไม่ได้',
               color: vm.updateErrorMessage == null ? c.ok : c.warn,
@@ -63,21 +63,26 @@ class DeviceSection extends StatelessWidget {
     final c = AppColors.of(context);
     final seen = vm.lastUpdated;
     final ago = seen == null ? null : DateTime.now().difference(seen);
-    return Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+    // ⚠️ `CrossAxisAlignment.stretch` ใน Row = ยืดลูกเต็มความสูง — การ์ดแถวนี้อยู่ใน ListView
+    // ที่ความสูงไม่จำกัด จึงกลายเป็น "infinite height" แล้วพังทั้งหน้า (เจอตอนรันจริง)
+    // IntrinsicHeight วัดความสูงของการ์ดที่สูงที่สุดให้ก่อน — ต้องมี stretch ไม่งั้นการ์ด 3 ใบ
+    // สูงไม่เท่ากัน ดูไม่เป็นแถวเดียวกัน
+    return IntrinsicHeight(
+        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Expanded(
         child: AppCard(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const CardTitle('ลงทะเบียน'),
-            Text(vm.assetNo.isEmpty ? 'รออนุมัติ' : 'พร้อมใช้งาน',
+            Text(vm.isRegistered ? 'พร้อมใช้งาน' : 'รออนุมัติ',
                 style: TextStyle(
                     fontSize: 21,
                     fontWeight: FontWeight.w600,
-                    color: vm.assetNo.isEmpty ? c.warn : c.ok)),
+                    color: vm.isRegistered ? c.ok : c.warn)),
             const SizedBox(height: 4),
             Text(
-              vm.assetNo.isEmpty
-                  ? 'เครื่องนี้ส่งข้อมูลไปแล้ว รอทีม IT อนุมัติ'
-                  : 'รหัสครุภัณฑ์ ${vm.assetNo}',
+              vm.isRegistered
+                  ? 'รหัสครุภัณฑ์ ${vm.assetNo}'
+                  : 'เครื่องนี้ส่งข้อมูลไปแล้ว รอทีม IT อนุมัติ',
               style: TextStyle(fontSize: 11, color: c.dim),
             ),
           ]),
@@ -124,7 +129,7 @@ class DeviceSection extends StatelessWidget {
           ]),
         ),
       ),
-    ]);
+    ]));
   }
 
   Widget _deviceCard(BuildContext context, DeviceDetail? d) => AppCard(

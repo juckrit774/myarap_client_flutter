@@ -6,12 +6,21 @@ class DeviceAuthResponse {
   final String assetTag;
   final String assetId;
 
+  /// เจ้าของเครื่องที่ผูกไว้ในระบบ — **ว่างได้** (เครื่องที่ยังรออนุมัติยังไม่มีเจ้าของ
+  /// และ backend รุ่นก่อน 2026-08-06 ไม่ส่ง 3 field นี้มาเลย)
+  final String owner;
+  final String ownerAccount;
+  final String ownerRole;
+
   const DeviceAuthResponse({
     required this.accessToken,
     required this.refreshToken,
     required this.fingerprint,
     required this.assetTag,
     required this.assetId,
+    this.owner = '',
+    this.ownerAccount = '',
+    this.ownerRole = '',
   });
 
   factory DeviceAuthResponse.fromJson(Map<String, dynamic> json) =>
@@ -21,6 +30,9 @@ class DeviceAuthResponse {
         fingerprint: json['fingerprint'] as String? ?? '',
         assetTag: json['assetTag'] as String? ?? '',
         assetId: json['assetId'] as String? ?? '',
+        owner: json['owner'] as String? ?? '',
+        ownerAccount: json['ownerAccount'] as String? ?? '',
+        ownerRole: json['ownerRole'] as String? ?? '',
       );
 
   Map<String, dynamic> toJson() => {
@@ -29,6 +41,9 @@ class DeviceAuthResponse {
         'fingerprint': fingerprint,
         'assetTag': assetTag,
         'assetId': assetId,
+        'owner': owner,
+        'ownerAccount': ownerAccount,
+        'ownerRole': ownerRole,
       };
 }
 

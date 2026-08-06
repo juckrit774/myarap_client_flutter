@@ -82,8 +82,20 @@ class HomeViewModel extends ChangeNotifier {
 
   String get userName => deviceDetail?.computerName ?? _deviceAuth?.assetTag ?? 'MYARAP User';
   String get assetNo => _deviceAuth?.assetTag ?? '-';
+
+  /// เจ้าของเครื่องตามที่ผูกไว้ในระบบ (ว่าง = ยังไม่ผูก / backend รุ่นเก่าไม่ส่งมา)
+  String get ownerName => _deviceAuth?.owner ?? '';
+  String get ownerAccount => _deviceAuth?.ownerAccount ?? '';
+  String get ownerRole => _deviceAuth?.ownerRole ?? '';
+
+  /// เครื่องถูกขึ้นทะเบียนเป็น asset แล้วหรือยัง — ดูที่ `assetId` ไม่ใช่ `assetTag`
+  /// เพราะเครื่องที่ยังไม่มี asset record backend จะคืน assetTag = fingerprint กลับมา
+  /// (ไม่เคยว่าง) ส่วน assetId ว่างจริงจนกว่าจะมีคนอนุมัติ
+  bool get isRegistered => (_deviceAuth?.assetId ?? '').isNotEmpty;
   String? get profileImageUrl => null;
-  DateTime? get lastUpdated => null;
+
+  /// เวลาที่ heartbeat สำเร็จครั้งล่าสุด — หน้าแรกใช้บอกว่า "ส่งข้อมูลล่าสุดเมื่อไร"
+  DateTime? lastUpdated;
   String? get accessToken => _deviceAuth?.accessToken;
 
   @override
@@ -194,6 +206,7 @@ class HomeViewModel extends ChangeNotifier {
 
       updateErrorMessage = null;
       final now = DateTime.now();
+      lastUpdated = now;
       assetUpdatedAt =
           '${now.month}/${now.day}/${now.year} ${now.hour}:${now.minute.toString().padLeft(2, '0')} '
           '${now.hour >= 12 ? 'PM' : 'AM'}';

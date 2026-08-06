@@ -8,7 +8,7 @@ import 'core/config/app_config.dart';
 import 'core/services/network_manager.dart';
 import 'core/storage/cache_manager.dart';
 import 'features/home/presentation/screens/home_screen.dart';
-import 'features/settings/presentation/screens/settings_screen.dart';
+import 'shared/widgets/app_shell.dart';
 
 final _navigatorKey = GlobalKey<NavigatorState>();
 
@@ -140,10 +140,10 @@ class _MyarapAppState extends State<MyarapApp> with WindowListener, TrayListener
   Future<void> _handleWindowCall(MethodCall call) async {
     switch (call.method) {
       case 'openSetting':
-        // Navigate to settings from anywhere in the app
-        _navigatorKey.currentState?.push(
-          MaterialPageRoute(builder: (_) => const SettingsScreen()),
-        );
+        // สลับหน้าในคอนโซล ไม่ push หน้าซ้อน — เมนูซ้ายต้องอยู่ในสายตาเสมอ
+        await windowManager.show();
+        await windowManager.focus();
+        requestedSection.value = AppSection.settings;
         break;
     }
   }

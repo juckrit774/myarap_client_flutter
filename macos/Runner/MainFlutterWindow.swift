@@ -916,6 +916,10 @@ class MainFlutterWindow: NSWindow {
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
 
+    // UI แบบคอนโซล (เมนูซ้าย + รายการ + รายละเอียด) ต้องการความกว้างขั้นต่ำ —
+    // ย่อกว่านี้แผงรายละเอียดจะแคบจนอ่านไม่ได้ ไม่ใช่แค่ดูอึดอัด
+    self.contentMinSize = NSSize(width: 1024, height: 640)
+
     RegisterGeneratedPlugins(registry: flutterViewController)
 
     let messenger = flutterViewController.engine.binaryMessenger

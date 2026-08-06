@@ -6,6 +6,14 @@ import '../../core/config/app_config.dart';
 /// หน้าจอที่เลือกได้จากเมนูซ้าย
 enum AppSection { device, report, tickets, notifications, settings }
 
+/// คำขอเปลี่ยนหน้าจาก**นอก widget tree** — เมนู Settings ของ macOS / tray ยิงเข้ามาที่
+/// `main.dart` ซึ่งไม่มี context ของ shell. เดิม main.dart แก้ด้วย `Navigator.push`
+/// หน้า Settings ซ้อนขึ้นมา (เมนูซ้ายหาย ต้องกด Back) — ผิดกติกาข้อเดียวของแบบ A
+///
+/// HomeScreen รับค่าไปสลับ section แล้ว **รีเซ็ตกลับเป็น null** เพื่อให้สั่งซ้ำค่าเดิมได้
+/// (ValueNotifier ไม่ยิง listener ถ้าค่าไม่เปลี่ยน — กดเมนูเดิมสองครั้งจะเงียบ)
+final requestedSection = ValueNotifier<AppSection?>(null);
+
 /// AppShell = โครงหลักของ agent แบบ **A · คอนโซล** — เมนูซ้ายคงที่ + พื้นที่เนื้อหาขวา
 ///
 /// ทำไมถึงเปลี่ยนจากของเดิม: หน้าต่าง agent เปิดที่ **1280×720** แต่ UI เดิมวางแบบแอปมือถือ
@@ -271,8 +279,15 @@ class SectionHeader extends StatelessWidget {
               child: Text(subtitle!, style: TextStyle(fontSize: 11, color: c.dim)),
             ),
           ],
-          const Spacer(),
-          ?trailing,
+          // ⚠️ ห้ามใช้ `Spacer()` แล้ววาง trailing ต่อท้าย — trailing จะถูกวัดด้วย
+          // ความกว้าง unbounded ทำให้ Row ที่ส่งเข้ามา (ปุ่มหลายตัว) ระเบิดตอน layout
+          // จัดชิดขวาด้วย Expanded + MainAxisAlignment.end แทน ซึ่งให้ constraint ที่มีขอบเขต
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [?trailing],
+            ),
+          ),
         ],
       ),
     );
