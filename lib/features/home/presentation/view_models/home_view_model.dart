@@ -1075,6 +1075,11 @@ $result | ConvertTo-Json -Compress -Depth 4
     _remoteCaptureTimer?.cancel();
     _remoteCaptureTimer = null;
     _remoteSessionId = '';
+    // 🔴 **ต้องล้างสิทธิ์ควบคุมทุกครั้งที่จบ session** — ไม่งั้น session ถัดไปจะถือว่า
+    // "อนุญาตแล้ว" ทั้งที่ยังไม่เคยถาม (ทั้งข้ามกล่องขออนุญาต และ `sendInput` ปล่อยผ่าน)
+    // เดิมไม่ได้ล้าง — เพิ่งมาเป็นปัญหาชัดตอนใส่ตัวกันเด้งซ้ำที่อ่านค่าธงนี้
+    _remoteControlGranted = false;
+    _remoteControlPending = false;
     _hideRemoteIndicator();
     _stopWebrtc();
     // macOS: หยุด SCStream → macOS ปิด screen-recording indicator (ไอคอนม่วง) ทันที
@@ -1094,15 +1099,26 @@ $result | ConvertTo-Json -Compress -Depth 4
   // ผู้ใช้ที่เครื่องนี้กดยินยอมให้ "ควบคุม" แล้วหรือยัง — คนละตัวกับ consent การ "ดู" หน้าจอ
   // ยินยอมให้ดู ≠ ยินยอมให้สั่งงาน จึงต้องถามแยกและเก็บ flag แยก
   bool _remoteControlGranted = false;
+  /// กำลังเปิดกล่องขอสิทธิ์ควบคุมค้างอยู่ — กันเด้งซ้ำแบบเดียวกับ `_remoteConsentPending`
+  bool _remoteControlPending = false;
 
   /// viewer ขอสิทธิ์ควบคุม (SSE ) → ถามผู้ใช้ที่เครื่องนี้
   Future<void> _onRemoteControlRequest(String sessionId, String viewer) async {
     if (sessionId.isEmpty || _remoteSessionId != sessionId) return;
+    // ⚠️ **กันกล่องเด้งซ้ำ** — `SSEHub.Push` ฝั่ง backend ส่ง event ให้ **ทุก stream ที่เปิดค้าง**
+    // ของเครื่องนั้น ถ้า agent มี stream ค้างมากกว่าหนึ่งเส้น event เดียวจะมาหลายรอบ
+    // ฝั่ง "ขอดูหน้าจอ" มี `_remoteConsentPending` กันไว้อยู่แล้ว แต่ฝั่ง "ขอควบคุม" **ไม่มี**
+    // จึงเด้งตามจำนวน stream (ผู้ใช้เจอจริง 3 ครั้ง — log ฝั่ง server ยืนยัน:
+    // control-consent 13 ครั้ง จากคำขอ 9 ครั้ง · consent 18 ครั้ง จาก 13 session)
+    if (_remoteControlPending || _remoteControlGranted) return;
+    _remoteControlPending = true;
     bool accept = false;
     try {
       accept = await _requestControlConsent(viewer);
     } catch (_) {
       accept = false;
+    } finally {
+      _remoteControlPending = false;
     }
     _remoteControlGranted = accept;
     if (accept) {
