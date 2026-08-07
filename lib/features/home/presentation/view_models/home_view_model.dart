@@ -59,6 +59,8 @@ class HomeViewModel extends ChangeNotifier {
   bool _remoteCapturing = false;
   bool _remoteConsentPending = false; // consent dialog กำลังเปิดอยู่ — กัน remote_start ซ้ำเด้ง popup ซ้อน
   String _remoteSessionId = ''; // session ที่กำลัง active (ใช้ตอนผู้ใช้กด Disconnect เอง)
+  /// ชื่อผู้ที่กำลังดูอยู่ — เก็บไว้เพื่อวาดแถบเตือนกลับเป็น "กำลังถูกดู" ตอนเลิกควบคุม
+  String _remoteViewer = '';
   /// process ของแถบทางสำรอง (PowerShell) — ใช้เฉพาะตอน native ไม่ขึ้น
   Process? _legacyBannerProc;
 
@@ -1060,6 +1062,7 @@ $result | ConvertTo-Json -Compress -Depth 4
     _rlog('ผล consent = ${accept ? "อนุญาต" : "ปฏิเสธ"}');
     if (!accept) return; // ปฏิเสธ → ไม่ capture
     _remoteSessionId = sessionId;
+    _remoteViewer = viewer;
     await _showRemoteIndicator(viewer);
     // macOS: เริ่ม SCStream (ทำให้ system indicator ผูกกับ session — หยุดแล้ว indicator หายทันที)
     if (Platform.isMacOS) {
@@ -1075,6 +1078,7 @@ $result | ConvertTo-Json -Compress -Depth 4
     _remoteCaptureTimer?.cancel();
     _remoteCaptureTimer = null;
     _remoteSessionId = '';
+    _remoteViewer = '';
     // 🔴 **ต้องล้างสิทธิ์ควบคุมทุกครั้งที่จบ session** — ไม่งั้น session ถัดไปจะถือว่า
     // "อนุญาตแล้ว" ทั้งที่ยังไม่เคยถาม (ทั้งข้ามกล่องขออนุญาต และ `sendInput` ปล่อยผ่าน)
     // เดิมไม่ได้ล้าง — เพิ่งมาเป็นปัญหาชัดตอนใส่ตัวกันเด้งซ้ำที่อ่านค่าธงนี้
@@ -1144,6 +1148,12 @@ $result | ConvertTo-Json -Compress -Depth 4
   /// viewer เลิกควบคุม หรือผู้ใช้กดหยุด → ปิดการรับ input ทันที (session ยังอยู่ ดูต่อได้)
   void _onRemoteControlRevoke() {
     _remoteControlGranted = false;
+    // 🔴 **คืนแถบเตือนกลับเป็น "กำลังถูกดู"** — เดิมสั่งเป็นสีแดง "กำลังถูกควบคุม" ตอนยินยอม
+    // แล้วไม่เคยสั่งกลับเลย พอเลิกควบคุมแถบจึงยังแดงค้างทั้งที่คุมไม่ได้แล้ว
+    // (ตัวจับเวลาบนแถบเดินต่อไม่รีเซ็ต — `Show()` ออกแบบให้เรียกซ้ำได้อยู่แล้ว)
+    if (_remoteSessionId.isNotEmpty) {
+      _showRemoteIndicator(_remoteViewer, controlling: false);
+    }
   }
 
   /// รับข้อความจาก data channel — **ทุกทางเข้าของ input ต้องผ่านฟังก์ชันนี้**
