@@ -49,6 +49,8 @@ class HomeViewModel extends ChangeNotifier {
 
   // SSE policy stream — รับ policy change จาก backend แบบ real-time (ไม่รอ heartbeat)
   StreamSubscription? _policyStreamSub;
+  /// รุ่นของการต่อ stream — กัน stream ค้างตอนถูกเรียกซ้อนกัน (ดู `_startPolicyStream`)
+  int _policyStreamGen = 0;
   Timer? _policyReconnect;
 
   // Remote Desktop — capture หน้าจอส่ง backend เมื่อ admin เปิด session
@@ -107,6 +109,9 @@ class HomeViewModel extends ChangeNotifier {
     _appChangeCooldown?.cancel();
     _windowsAppTimer?.cancel();
     _usbPollTimer?.cancel();
+    // bump รุ่นด้วย — ถ้ามีการเปิดสายค้างอยู่ระหว่าง await มันจะปิดตัวเองตอน resolve
+    // (แค่ cancel ตัวที่จำไว้ไม่พอ เพราะสายที่ยังเปิดไม่อยู่ในตัวแปรนี้)
+    _policyStreamGen++;
     _policyStreamSub?.cancel();
     _policyReconnect?.cancel();
     _remoteCaptureTimer?.cancel();
@@ -467,12 +472,29 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
   // ทันทีที่ admin เปลี่ยน USB policy ใน web UI. event "init" ตอน connect ส่งค่าปัจจุบัน
   // เสมอ ดังนั้น reconnect หลัง stream หลุดจะ sync ค่าล่าสุดได้เอง ไม่มี event ตกหล่น
 
+  // 🔴 **กัน stream ค้าง** — ฟังก์ชันนี้เป็น async และ **เคลียร์ `_policyStreamSub` ทิ้งก่อน
+  // `await` เปิดสายใหม่** ถ้าถูกเรียกซ้อนกัน (reconnect timer ชนกับการต่อใหม่หลัง refresh
+  // token) สายของรอบแรกจะเปิดค้างโดยไม่มีใครถือ reference ไปยกเลิก → agent มี stream
+  // เปิดค้างหลายเส้นพร้อมกัน · ฝั่ง backend `SSEHub.Push` ส่ง event ให้ **ทุกเส้น** →
+  // `_handleStreamEvent` ทำงานซ้ำตามจำนวนเส้น = กล่องขออนุญาตเด้งซ้ำ (ผู้ใช้เจอ 3 ครั้ง)
+  //
+  // ตัวกันที่ใส่ไว้ก่อนหน้า (`_remoteConsentPending`/`_remoteControlPending`) แก้ที่ปลายทาง
+  // เท่านั้น — event ยังมาซ้ำอยู่ ที่นี่คือต้นทาง
   Future<void> _startPolicyStream() async {
     _policyReconnect?.cancel();
+    final gen = ++_policyStreamGen;
     await _policyStreamSub?.cancel();
     _policyStreamSub = null;
     try {
       final body = await NetworkManager.instance.openV3Stream('/v3/api/device/stream');
+      // มีคนเรียกซ้อนระหว่างที่รอสายนี้เปิด → รอบนี้ล้าสมัยแล้ว **ต้องปิดทิ้ง ไม่ใช่ปล่อย**
+      // (subscribe แล้ว cancel ทันที = ปิด socket ของ Dio จริง ไม่ใช่แค่เลิกฟัง)
+      if (gen != _policyStreamGen) {
+        try {
+          await body.stream.listen(null).cancel();
+        } catch (_) {}
+        return;
+      }
       String buf = '';
       _policyStreamSub = body.stream.listen((chunk) {
         buf += utf8.decode(chunk, allowMalformed: true);
@@ -489,11 +511,12 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
           }
         }
       },
-          onError: (_) => _schedulePolicyReconnect(),
-          onDone: _schedulePolicyReconnect,
+          // สายที่ล้าสมัยห้ามสั่ง reconnect — ไม่งั้นมันจะไปล้มสายที่ยังดีอยู่
+          onError: (_) { if (gen == _policyStreamGen) _schedulePolicyReconnect(); },
+          onDone: () { if (gen == _policyStreamGen) _schedulePolicyReconnect(); },
           cancelOnError: true);
     } catch (_) {
-      _schedulePolicyReconnect();
+      if (gen == _policyStreamGen) _schedulePolicyReconnect();
     }
   }
 
