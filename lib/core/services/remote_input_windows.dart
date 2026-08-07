@@ -38,6 +38,17 @@ const int _mouseHWheel = 0x1000;
 const int _keyKeyUp = 0x0002;
 const int _keyScancode = 0x0008;
 
+/// ลายเซ็นที่ประทับลง `dwExtraInfo` ของทุก event ที่ **เรายิงเอง**
+///
+/// ทำไมต้องมี: แถบเตือน (`remote_banner.cpp`) มีปุ่ม "หยุด" ซึ่งเป็นของ**คนหน้าเครื่อง**
+/// ถ้าฝั่งที่ควบคุมอยู่เลื่อนเมาส์ไปคลิกโดน (ตั้งใจหรือไม่ก็ตาม) session จะจบทันที
+/// โดยเจ้าของเครื่องไม่ได้สั่ง · Win32 อ่านค่านี้กลับได้ด้วย `GetMessageExtraInfo()`
+/// จึงกรองทิ้งได้ตรงจุด — เทียบเท่ากับที่ฝั่ง macOS ทำผ่าน
+/// `CGEvent.setIntegerValueField(.eventSourceUserData)` อยู่แล้ว
+///
+/// ค่า = 'MYAR' ในรูป ASCII (ต้องตรงกับ `kMyarapInjectedTag` ใน remote_banner.cpp)
+const int kMyarapInjectedTag = 0x4D594152;
+
 const int _smCxScreen = 0;
 const int _smCyScreen = 1;
 
@@ -128,14 +139,14 @@ class RemoteInputWindows {
       mi.mouseData = mouseData;
       mi.dwFlags = flags;
       mi.time = 0;
-      mi.dwExtraInfo = 0;
+      mi.dwExtraInfo = kMyarapInjectedTag;
     } else {
       final ki = Pointer<_KeybdInput>.fromAddress(buf.address + _unionOffset).ref;
       ki.wVk = vk;
       ki.wScan = scan;
       ki.dwFlags = flags;
       ki.time = 0;
-      ki.dwExtraInfo = 0;
+      ki.dwExtraInfo = kMyarapInjectedTag;
     }
   }
 

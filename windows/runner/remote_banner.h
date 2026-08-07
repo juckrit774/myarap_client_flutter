@@ -28,7 +28,10 @@ int Show(const std::wstring& viewer, bool controlling);
 void Hide();
 
 // ผู้ใช้กด "หยุด" หรือกด Esc ค้างครบ 2 วินาที
-void SetOnStop(std::function<void()> callback);
+//
+// callback รับ **ที่มา** ของการหยุด (`"btn"` / `"esc"`) — ส่งต่อถึง Dart เพื่อลงบันทึก
+// เพราะทั้งสองทางให้ผลปลายทางเหมือนกันเป๊ะ (session จบ) แต่แก้คนละเรื่องกันคนละทาง
+void SetOnStop(std::function<void(const char*)> callback);
 
 }  // namespace remote_banner
 

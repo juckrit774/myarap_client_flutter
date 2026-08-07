@@ -18,6 +18,9 @@ constexpr UINT_PTR kTimerId = 1;
 constexpr int kTickMs = 250;
 // Esc ค้างครบเท่านี้ = หยุดทันที (ทางออกฉุกเฉินตอนเมาส์อยู่ในมือคนอื่น)
 constexpr int kEscHoldMs = 2000;
+// ลายเซ็นใน dwExtraInfo ของ event ที่ agent ยิงเอง — ต้องตรงกับ `kMyarapInjectedTag`
+// ใน lib/core/services/remote_input_windows.dart
+constexpr LPARAM kMyarapInjectedTag = 0x4D594152;
 
 // กรอบปุ่ม "หยุด" — ใช้ทั้งตอนวาดและตอน hit-test ต้องเป็นค่าเดียวกันเสมอ
 constexpr int kBtnX = 378, kBtnY = 6, kBtnW = 80, kBtnH = 28;
@@ -29,7 +32,7 @@ struct State {
   // เวลาเริ่ม session — 0 = ไม่มี session อยู่
   ULONGLONG started_at = 0;
   ULONGLONG esc_down_since = 0;
-  std::function<void()> on_stop;
+  std::function<void(const char*)> on_stop;
   bool stopping = false;
 };
 
@@ -46,12 +49,12 @@ COLORREF AccentTo(bool controlling) {
   return controlling ? RGB(0xd1, 0x3a, 0x5c) : RGB(0x3f, 0xb6, 0xc9);
 }
 
-void FireStop() {
+void FireStop(const char* reason) {
   auto& s = S();
   if (s.stopping) return;  // กันยิงซ้ำตอนปิดหลายหน้าต่างพร้อมกัน
   s.stopping = true;
   auto cb = s.on_stop;
-  if (cb) cb();
+  if (cb) cb(reason);
   s.stopping = false;
 }
 
@@ -174,11 +177,15 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 1;  // วาดพื้นเองใน WM_PAINT — ไม่งั้นกะพริบทุกวินาทีตอนอัปเดตเวลา
 
     case WM_LBUTTONUP: {
+      // 🔴 ปุ่ม "หยุด" เป็นของ**คนหน้าเครื่อง** — คลิกที่เรายิงเองตอนถูกควบคุมต้องไม่นับ
+      // ไม่งั้นฝั่งที่ควบคุมอยู่กดจบ session ของเจ้าของเครื่องได้ (และเจอจริง: ผู้ใช้
+      // รายงานว่าเลื่อนเมาส์ไปกดปุ่มมุมขวาบนแล้ว "เหมือนหลุด" ทั้งที่ agent ยังอยู่)
+      if (GetMessageExtraInfo() == kMyarapInjectedTag) return 0;
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
       if (x >= kBtnX && x <= kBtnX + kBtnW && y >= kBtnY &&
           y <= kBtnY + kBtnH) {
-        FireStop();
+        FireStop("btn");
       }
       return 0;
     }
@@ -207,7 +214,7 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             s.esc_down_since = GetTickCount64();
           } else if (GetTickCount64() - s.esc_down_since >= kEscHoldMs) {
             s.esc_down_since = 0;
-            FireStop();
+            FireStop("esc");
           }
         } else {
           s.esc_down_since = 0;
@@ -288,7 +295,7 @@ void Hide() {
   S().started_at = 0;
 }
 
-void SetOnStop(std::function<void()> callback) {
+void SetOnStop(std::function<void(const char*)> callback) {
   S().on_stop = std::move(callback);
 }
 

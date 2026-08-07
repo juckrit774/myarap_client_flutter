@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -89,9 +90,17 @@ bool FlutterWindow::OnCreate() {
 
   // ผู้ใช้กด "หยุด" บนแถบ (หรือกด Esc ค้าง) → บอก Dart ให้ตัด session
   // ใช้ InvokeMethod สวนกลับ เพราะฝั่ง Windows ไม่มี EventChannel เหมือน macOS
-  remote_banner::SetOnStop([this]() {
+  remote_banner::SetOnStop([this](const char* reason) {
     if (remote_channel_) {
-      remote_channel_->InvokeMethod("remoteStopByUser", nullptr);
+      // ส่งที่มาไปด้วย ("btn" = กดปุ่มหยุดบนแถบ · "esc" = กด Esc ค้างครบ 2 วิ)
+      // ปลายทางแค่ลงบันทึก — ทั้งสองทางจบ session เหมือนกัน แต่ตอนไล่ปัญหา
+      // "session หลุดเอง" ต้องแยกให้ออกว่ามาจากทางไหน
+      remote_channel_->InvokeMethod(
+          "remoteStopByUser",
+          std::make_unique<flutter::EncodableValue>(
+              flutter::EncodableMap{{flutter::EncodableValue("reason"),
+                                     flutter::EncodableValue(std::string(
+                                         reason ? reason : "unknown"))}}));
     }
   });
 

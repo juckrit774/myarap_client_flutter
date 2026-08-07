@@ -1636,6 +1636,12 @@ Add-Type -AssemblyName System.Drawing
   void _listenWindowsRemoteStop() {
     _remoteChannel.setMethodCallHandler((call) async {
       if (call.method != 'remoteStopByUser') return null;
+      // "btn" = คนหน้าเครื่องกดปุ่มหยุดบนแถบ · "esc" = กด Esc ค้างครบ 2 วินาที
+      // ⚠️ Esc แยกไม่ออกว่ามาจากเจ้าของเครื่องหรือจากฝั่งที่ควบคุมอยู่
+      // (`GetAsyncKeyState` ไม่บอกที่มา) — ถ้าเจอ session จบเองบ่อย ๆ ให้ดูค่านี้ก่อน
+      final reason =
+          (call.arguments is Map ? call.arguments['reason'] : null) ?? 'unknown';
+      _rlog('ผู้ใช้สั่งหยุดจากแถบเตือน (ที่มา=$reason)');
       final sid = _remoteSessionId;
       _stopRemoteCapture();
       if (sid.isNotEmpty) {
