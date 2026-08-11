@@ -34,11 +34,76 @@ struct State {
   ULONGLONG esc_down_since = 0;
   std::function<void(const char*)> on_stop;
   bool stopping = false;
+
+  // ── low-level hooks: ตัวเดียวที่แยก "คนหน้าเครื่อง" ออกจาก "ฝั่งที่ควบคุมอยู่" ได้จริง ──
+  //
+  // 🔴 ปุ่ม "หยุด" และ Esc ค้าง เป็นทางออกของ**คนหน้าเครื่อง** ฝั่งที่ควบคุมอยู่ต้องกดไม่ได้
+  // ของเดิมกันไว้คนละแบบและรั่วทั้งคู่:
+  //   · ปุ่ม → `GetMessageExtraInfo()` ซึ่งคืนค่าของ **ข้อความล่าสุดที่ดึงจากคิว** ถ้า
+  //     WndProc ถูกเรียกผ่าน SendMessage/ทางอื่นที่ไม่ผ่านคิว ค่าจะเป็นของข้อความอื่นไปแล้ว
+  //     (มักเป็น 0) → ด่านผ่านฉลุย
+  //   · Esc → `GetAsyncKeyState` ซึ่ง **ไม่มีข้อมูลที่มา** แยก injected ไม่ได้เลยตั้งแต่ต้น
+  // LL hook เห็น `LLMHF_INJECTED`/`LLKHF_INJECTED` + `dwExtraInfo` ของทุก event ตรง ๆ
+  // (เทียบเท่า global monitor + eventSourceUserData ที่ฝั่ง macOS ใช้อยู่)
+  HHOOK mouse_hook = nullptr;
+  HHOOK kbd_hook = nullptr;
+  // ปุ่มซ้ายที่ปล่อยล่าสุด "ถูกยิงเข้ามา" หรือไม่ — WM_LBUTTONUP อ่านค่านี้แทน GetMessageExtraInfo
+  bool last_lbup_injected = false;
 };
 
 State& S() {
   static State s;
   return s;
+}
+
+// hook ทั้งสองตัวรันบนเธรดหลัก (เธรดที่ติดตั้ง) และถูกเรียกทุก event ทั้งเครื่อง
+// → ต้องเบาที่สุด ห้ามบล็อก ไม่งั้น Windows ถอด hook ทิ้งเองเมื่อเกิน LowLevelHooksTimeout
+LRESULT CALLBACK LlMouseProc(int code, WPARAM wp, LPARAM lp) {
+  if (code == HC_ACTION && wp == WM_LBUTTONUP) {
+    const auto* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(lp);
+    S().last_lbup_injected =
+        (ms->flags & LLMHF_INJECTED) != 0 ||
+        ms->dwExtraInfo == static_cast<ULONG_PTR>(kMyarapInjectedTag);
+  }
+  return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+LRESULT CALLBACK LlKeyProc(int code, WPARAM wp, LPARAM lp) {
+  if (code == HC_ACTION) {
+    const auto* ks = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lp);
+    if (ks->vkCode == VK_ESCAPE) {
+      // ⚠️ กรอง **injected ทุกชนิด** ไม่ใช่เฉพาะลายเซ็นของเรา — ทางออกฉุกเฉินนี้มีไว้ให้
+      // "คนที่นั่งอยู่หน้าเครื่อง" เท่านั้น อะไรที่ถูกยิงเข้ามาไม่นับทั้งหมด
+      // แลกกับ: on-screen keyboard / โปรแกรมช่วยเหลือที่ยิง Esc จะใช้ทางนี้ไม่ได้
+      // (ยังกดปุ่ม "หยุด" บนแถบได้ตามปกติ จึงไม่ได้ทำให้ไม่มีทางออก)
+      const bool injected =
+          (ks->flags & LLKHF_INJECTED) != 0 ||
+          ks->dwExtraInfo == static_cast<ULONG_PTR>(kMyarapInjectedTag);
+      if (!injected) {
+        if (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) {
+          if (S().esc_down_since == 0) S().esc_down_since = GetTickCount64();
+        } else if (wp == WM_KEYUP || wp == WM_SYSKEYUP) {
+          S().esc_down_since = 0;
+        }
+      }
+    }
+  }
+  return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+void InstallHooks() {
+  auto& s = S();
+  HINSTANCE mod = GetModuleHandle(nullptr);
+  if (!s.mouse_hook) s.mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, LlMouseProc, mod, 0);
+  if (!s.kbd_hook) s.kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, LlKeyProc, mod, 0);
+  s.last_lbup_injected = false;
+}
+
+void RemoveHooks() {
+  auto& s = S();
+  if (s.mouse_hook) { UnhookWindowsHookEx(s.mouse_hook); s.mouse_hook = nullptr; }
+  if (s.kbd_hook) { UnhookWindowsHookEx(s.kbd_hook); s.kbd_hook = nullptr; }
+  s.last_lbup_injected = false;
 }
 
 COLORREF AccentFrom(bool controlling) {
@@ -177,15 +242,20 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 1;  // วาดพื้นเองใน WM_PAINT — ไม่งั้นกะพริบทุกวินาทีตอนอัปเดตเวลา
 
     case WM_LBUTTONUP: {
-      // 🔴 ปุ่ม "หยุด" เป็นของ**คนหน้าเครื่อง** — คลิกที่เรายิงเองตอนถูกควบคุมต้องไม่นับ
-      // ไม่งั้นฝั่งที่ควบคุมอยู่กดจบ session ของเจ้าของเครื่องได้ (และเจอจริง: ผู้ใช้
-      // รายงานว่าเลื่อนเมาส์ไปกดปุ่มมุมขวาบนแล้ว "เหมือนหลุด" ทั้งที่ agent ยังอยู่)
-      if (GetMessageExtraInfo() == kMyarapInjectedTag) return 0;
+      // 🔴 ปุ่ม "หยุด" เป็นของ**คนหน้าเครื่อง** — คลิกที่ถูกยิงเข้ามาต้องไม่นับ
+      // ไม่งั้นฝั่งที่ควบคุมอยู่กดจบ session ของเจ้าของเครื่องได้
+      //
+      // เชื่อ LL hook ก่อนเสมอ (เห็น LLMHF_INJECTED ตรง ๆ) · ถ้าติดตั้ง hook ไม่สำเร็จ
+      // ค่อยถอยไปใช้ `GetMessageExtraInfo()` ตัวเดิม — รั่วได้แต่ดีกว่าไม่กันเลย
+      if (S().mouse_hook ? S().last_lbup_injected
+                         : (GetMessageExtraInfo() == kMyarapInjectedTag)) {
+        return 0;
+      }
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
       if (x >= kBtnX && x <= kBtnX + kBtnW && y >= kBtnY &&
           y <= kBtnY + kBtnH) {
-        FireStop("btn");
+        FireStop(S().mouse_hook ? "btn" : "btn-nohook");
       }
       return 0;
     }
@@ -204,20 +274,30 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
       // Esc ค้าง — เฉพาะตอนถูกควบคุม เพราะปุ่มหยุดต้องใช้เมาส์ซึ่งอยู่ในมือคนอื่น
       //
-      // ⚠️ GetAsyncKeyState แยกไม่ออกว่า Esc มาจากเจ้าของเครื่องหรือจาก SendInput
-      // ของฝั่งที่ควบคุมอยู่ (ต่างจาก macOS ที่ประทับลายเซ็นลง CGEvent แล้วกรองได้)
-      // ผลที่แย่ที่สุดคือ "หยุดการควบคุม" ซึ่งเป็นฝั่งปลอดภัย จึงยอมรับไว้ก่อน
+      // เมื่อมี kbd hook: `esc_down_since` ถูกตั้ง/ล้างจาก hook ซึ่งนับเฉพาะ Esc ที่
+      // **ไม่ได้ถูกยิงเข้ามา** · ตรงนี้เหลือหน้าที่แค่จับเวลาว่าค้างครบหรือยัง
+      //
+      // ⚠️ ทางถอย (hook ติดตั้งไม่สำเร็จ) ยังใช้ GetAsyncKeyState ซึ่ง **แยกที่มาไม่ได้**
+      // จึงแยกชื่อเหตุเป็น `esc-nohook` ไว้ใน log — เห็นค่านี้เมื่อไรแปลว่ากลับไปใช้ทางที่รั่ว
       if (s.controlling) {
-        const bool down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-        if (down) {
-          if (s.esc_down_since == 0) {
-            s.esc_down_since = GetTickCount64();
-          } else if (GetTickCount64() - s.esc_down_since >= kEscHoldMs) {
+        if (s.kbd_hook) {
+          if (s.esc_down_since != 0 &&
+              GetTickCount64() - s.esc_down_since >= kEscHoldMs) {
             s.esc_down_since = 0;
             FireStop("esc");
           }
         } else {
-          s.esc_down_since = 0;
+          const bool down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+          if (down) {
+            if (s.esc_down_since == 0) {
+              s.esc_down_since = GetTickCount64();
+            } else if (GetTickCount64() - s.esc_down_since >= kEscHoldMs) {
+              s.esc_down_since = 0;
+              FireStop("esc-nohook");
+            }
+          } else {
+            s.esc_down_since = 0;
+          }
         }
       }
       return 0;
@@ -282,6 +362,9 @@ int Show(const std::wstring& viewer, bool controlling) {
   const bool had_session = s.started_at != 0;
   DestroyAll();
   EnsureClass();
+  // ติดตั้ง hook ตอนแถบขึ้น (= มี session อยู่) เท่านั้น — ไม่ดักอินพุตทั้งเครื่องทิ้งไว้ตลอดเวลา
+  // `Show()` ถูกเรียกซ้ำได้ตอนสลับ ดู↔ควบคุม จึงต้อง idempotent (InstallHooks เช็ค null ให้แล้ว)
+  InstallHooks();
   s.viewer = viewer;
   s.controlling = controlling;
   s.esc_down_since = 0;
@@ -292,6 +375,7 @@ int Show(const std::wstring& viewer, bool controlling) {
 
 void Hide() {
   DestroyAll();
+  RemoveHooks();  // จบ session แล้วต้องเลิกดักอินพุตทั้งเครื่องทันที
   S().started_at = 0;
 }
 

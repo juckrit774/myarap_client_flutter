@@ -1742,6 +1742,12 @@ Add-Type -AssemblyName System.Drawing
           (call.arguments is Map ? call.arguments['reason'] : null) ?? 'unknown';
       _rlog('ผู้ใช้สั่งหยุดจากแถบเตือน (ที่มา=$reason)');
       final sid = _remoteSessionId;
+      // ส่งที่มาขึ้น backend ด้วย — ไม่ใช่แค่ลงไฟล์ที่เครื่อง
+      //
+      // เดิมมีแต่ `_rlog` ลง %TEMP%\myarap-remote.log ซึ่งต้องให้คนหน้าเครื่องไปหยิบไฟล์มาให้
+      // ทำให้ตอนไล่ปัญหาเห็นแค่ "agent ยิง stop" ใน log ของ server แต่ไม่รู้ว่ามาจากทางไหน
+      // เสียเวลาไปหนึ่งรอบเต็ม ๆ · ค่านี้ลงทั้ง log ของ backend แล้วอ่านได้จากระยะไกลทันที
+      _remoteDiag(sid, 'stop_by_user', reason);
       _stopRemoteCapture();
       if (sid.isNotEmpty) {
         try {
