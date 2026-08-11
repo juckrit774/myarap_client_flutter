@@ -3,7 +3,10 @@
 #include <windows.h>
 #include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
 
+#include <atomic>
 #include <cstdio>      // swprintf_s
+#include <future>
+#include <thread>
 #include <vector>
 
 namespace remote_banner {
@@ -35,35 +38,47 @@ struct State {
   std::function<void(const char*)> on_stop;
   bool stopping = false;
 
-  // ── low-level hooks: ตัวเดียวที่แยก "คนหน้าเครื่อง" ออกจาก "ฝั่งที่ควบคุมอยู่" ได้จริง ──
-  //
-  // 🔴 ปุ่ม "หยุด" และ Esc ค้าง เป็นทางออกของ**คนหน้าเครื่อง** ฝั่งที่ควบคุมอยู่ต้องกดไม่ได้
-  // ของเดิมกันไว้คนละแบบและรั่วทั้งคู่:
-  //   · ปุ่ม → `GetMessageExtraInfo()` ซึ่งคืนค่าของ **ข้อความล่าสุดที่ดึงจากคิว** ถ้า
-  //     WndProc ถูกเรียกผ่าน SendMessage/ทางอื่นที่ไม่ผ่านคิว ค่าจะเป็นของข้อความอื่นไปแล้ว
-  //     (มักเป็น 0) → ด่านผ่านฉลุย
-  //   · Esc → `GetAsyncKeyState` ซึ่ง **ไม่มีข้อมูลที่มา** แยก injected ไม่ได้เลยตั้งแต่ต้น
-  // LL hook เห็น `LLMHF_INJECTED`/`LLKHF_INJECTED` + `dwExtraInfo` ของทุก event ตรง ๆ
-  // (เทียบเท่า global monitor + eventSourceUserData ที่ฝั่ง macOS ใช้อยู่)
-  HHOOK mouse_hook = nullptr;
-  HHOOK kbd_hook = nullptr;
-  // ปุ่มซ้ายที่ปล่อยล่าสุด "ถูกยิงเข้ามา" หรือไม่ — WM_LBUTTONUP อ่านค่านี้แทน GetMessageExtraInfo
-  bool last_lbup_injected = false;
 };
+
+// ── low-level hooks: ตัวเดียวที่แยก "คนหน้าเครื่อง" ออกจาก "ฝั่งที่ควบคุมอยู่" ได้จริง ──
+//
+// 🔴 ปุ่ม "หยุด" และ Esc ค้าง เป็นทางออกของ**คนหน้าเครื่อง** ฝั่งที่ควบคุมอยู่ต้องกดไม่ได้
+// ของเดิมกันไว้คนละแบบและรั่วทั้งคู่:
+//   · ปุ่ม → `GetMessageExtraInfo()` คืนค่าของ **ข้อความล่าสุดที่ดึงจากคิว** ถ้า WndProc
+//     ถูกเรียกโดยไม่ผ่านคิว ค่าจะเป็นของข้อความอื่น (มักเป็น 0) → ด่านผ่านฉลุย
+//   · Esc → `GetAsyncKeyState` **ไม่มีข้อมูลที่มา** แยก injected ไม่ได้เลยตั้งแต่ต้น
+// LL hook เห็น `LLMHF_INJECTED`/`LLKHF_INJECTED` + `dwExtraInfo` ของทุก event ตรง ๆ
+// (เทียบเท่า global monitor + eventSourceUserData ที่ฝั่ง macOS ใช้อยู่)
+//
+// 🔴🔴 **hook ต้องอยู่บนเธรดของตัวเอง ห้ามอยู่บนเธรดหลัก** — LL hook ทั้งระบบถูกเรียก
+// เข้ามาที่เธรดที่ติดตั้งไว้ ทุก event ของทั้งเครื่องต้องรอ callback นี้ตอบก่อนถึงจะถูกส่งต่อ
+// เธรดหลักของ Flutter รัน Dart + capture หน้าจอ + encode JPEG ทุก 400ms จึงค้างเกิน
+// `LowLevelHooksTimeout` (ปกติ 300ms) ได้ง่ายมาก ผลคือ:
+//   · Windows ข้าม hook ของเราไปเงียบ ๆ → ธง injected ไม่ถูกอัปเดต → **ด่านรั่วเหมือนเดิม**
+//   · อินพุตของทั้งเครื่องหน่วง/หล่น — **เจอของจริง**: กด ✕ ของหน้าต่าง agent ผ่าน remote
+//     แล้วปุ่มขึ้นไฮไลต์แต่หน้าต่างไม่ปิด เพราะคลิกถูกหน่วงจนแอปไม่นับเป็นคลิก
+// เธรดแยกไม่มีอะไรมาบล็อก callback จึงตอบทันทีเสมอ
+std::thread g_hook_thread;
+DWORD g_hook_tid = 0;
+std::atomic<bool> g_hooks_ready{false};
+// ปุ่มซ้ายที่ปล่อยล่าสุด "ถูกยิงเข้ามา" หรือไม่ — WM_LBUTTONUP อ่านค่านี้แทน GetMessageExtraInfo
+std::atomic<bool> g_last_lbup_injected{false};
+// เวลาที่ Esc (ของจริง ไม่ใช่ที่ถูกยิงเข้ามา) เริ่มถูกกดค้าง — 0 = ไม่ได้กดอยู่
+std::atomic<ULONGLONG> g_esc_down_since{0};
 
 State& S() {
   static State s;
   return s;
 }
 
-// hook ทั้งสองตัวรันบนเธรดหลัก (เธรดที่ติดตั้ง) และถูกเรียกทุก event ทั้งเครื่อง
-// → ต้องเบาที่สุด ห้ามบล็อก ไม่งั้น Windows ถอด hook ทิ้งเองเมื่อเกิน LowLevelHooksTimeout
+// ⚠️ callback สองตัวนี้รันบน **เธรด hook** ไม่ใช่เธรดหลัก — แตะได้เฉพาะตัวแปร atomic
+// และต้องคืนค่าให้เร็วที่สุด (ทุก event ของทั้งเครื่องรออยู่)
 LRESULT CALLBACK LlMouseProc(int code, WPARAM wp, LPARAM lp) {
   if (code == HC_ACTION && wp == WM_LBUTTONUP) {
     const auto* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(lp);
-    S().last_lbup_injected =
+    g_last_lbup_injected.store(
         (ms->flags & LLMHF_INJECTED) != 0 ||
-        ms->dwExtraInfo == static_cast<ULONG_PTR>(kMyarapInjectedTag);
+        ms->dwExtraInfo == static_cast<ULONG_PTR>(kMyarapInjectedTag));
   }
   return CallNextHookEx(nullptr, code, wp, lp);
 }
@@ -81,9 +96,10 @@ LRESULT CALLBACK LlKeyProc(int code, WPARAM wp, LPARAM lp) {
           ks->dwExtraInfo == static_cast<ULONG_PTR>(kMyarapInjectedTag);
       if (!injected) {
         if (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) {
-          if (S().esc_down_since == 0) S().esc_down_since = GetTickCount64();
+          ULONGLONG expected = 0;
+          g_esc_down_since.compare_exchange_strong(expected, GetTickCount64());
         } else if (wp == WM_KEYUP || wp == WM_SYSKEYUP) {
-          S().esc_down_since = 0;
+          g_esc_down_since.store(0);
         }
       }
     }
@@ -91,19 +107,45 @@ LRESULT CALLBACK LlKeyProc(int code, WPARAM wp, LPARAM lp) {
   return CallNextHookEx(nullptr, code, wp, lp);
 }
 
-void InstallHooks() {
-  auto& s = S();
+// เธรดของ hook: ติดตั้ง → ปั๊ม message ของตัวเอง → ถอดตอนได้ WM_QUIT
+// ต้องมี message loop เป็นของตัวเอง ไม่งั้น LL hook ไม่ถูกเรียกเลย
+void HookThreadMain(std::promise<bool> ready) {
+  g_hook_tid = GetCurrentThreadId();
   HINSTANCE mod = GetModuleHandle(nullptr);
-  if (!s.mouse_hook) s.mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, LlMouseProc, mod, 0);
-  if (!s.kbd_hook) s.kbd_hook = SetWindowsHookExW(WH_KEYBOARD_LL, LlKeyProc, mod, 0);
-  s.last_lbup_injected = false;
+  HHOOK mh = SetWindowsHookExW(WH_MOUSE_LL, LlMouseProc, mod, 0);
+  HHOOK kh = SetWindowsHookExW(WH_KEYBOARD_LL, LlKeyProc, mod, 0);
+  const bool ok = mh != nullptr && kh != nullptr;
+  g_hooks_ready.store(ok);
+  ready.set_value(ok);
+
+  MSG msg;
+  while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    // ไม่ต้อง dispatch อะไร — เธรดนี้มีไว้ให้ hook ถูกเรียกอย่างเดียว
+  }
+
+  if (mh) UnhookWindowsHookEx(mh);
+  if (kh) UnhookWindowsHookEx(kh);
+  g_hooks_ready.store(false);
+  g_hook_tid = 0;
+}
+
+void InstallHooks() {
+  if (g_hook_thread.joinable()) return;  // ติดตั้งไว้แล้ว (Show() ถูกเรียกซ้ำได้)
+  g_last_lbup_injected.store(false);
+  g_esc_down_since.store(0);
+  std::promise<bool> pr;
+  auto fut = pr.get_future();
+  g_hook_thread = std::thread(HookThreadMain, std::move(pr));
+  // รอให้ติดตั้งเสร็จก่อนคืน — ไม่งั้นคลิกแรก ๆ จะยังไม่มีตัวกัน
+  fut.wait_for(std::chrono::milliseconds(1000));
 }
 
 void RemoveHooks() {
-  auto& s = S();
-  if (s.mouse_hook) { UnhookWindowsHookEx(s.mouse_hook); s.mouse_hook = nullptr; }
-  if (s.kbd_hook) { UnhookWindowsHookEx(s.kbd_hook); s.kbd_hook = nullptr; }
-  s.last_lbup_injected = false;
+  if (!g_hook_thread.joinable()) return;
+  if (g_hook_tid) PostThreadMessageW(g_hook_tid, WM_QUIT, 0, 0);
+  g_hook_thread.join();
+  g_last_lbup_injected.store(false);
+  g_esc_down_since.store(0);
 }
 
 COLORREF AccentFrom(bool controlling) {
@@ -247,15 +289,15 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       //
       // เชื่อ LL hook ก่อนเสมอ (เห็น LLMHF_INJECTED ตรง ๆ) · ถ้าติดตั้ง hook ไม่สำเร็จ
       // ค่อยถอยไปใช้ `GetMessageExtraInfo()` ตัวเดิม — รั่วได้แต่ดีกว่าไม่กันเลย
-      if (S().mouse_hook ? S().last_lbup_injected
-                         : (GetMessageExtraInfo() == kMyarapInjectedTag)) {
+      if (g_hooks_ready.load() ? g_last_lbup_injected.load()
+                               : (GetMessageExtraInfo() == kMyarapInjectedTag)) {
         return 0;
       }
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
       if (x >= kBtnX && x <= kBtnX + kBtnW && y >= kBtnY &&
           y <= kBtnY + kBtnH) {
-        FireStop(S().mouse_hook ? "btn" : "btn-nohook");
+        FireStop(g_hooks_ready.load() ? "btn" : "btn-nohook");
       }
       return 0;
     }
@@ -280,10 +322,10 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // ⚠️ ทางถอย (hook ติดตั้งไม่สำเร็จ) ยังใช้ GetAsyncKeyState ซึ่ง **แยกที่มาไม่ได้**
       // จึงแยกชื่อเหตุเป็น `esc-nohook` ไว้ใน log — เห็นค่านี้เมื่อไรแปลว่ากลับไปใช้ทางที่รั่ว
       if (s.controlling) {
-        if (s.kbd_hook) {
-          if (s.esc_down_since != 0 &&
-              GetTickCount64() - s.esc_down_since >= kEscHoldMs) {
-            s.esc_down_since = 0;
+        if (g_hooks_ready.load()) {
+          const ULONGLONG since = g_esc_down_since.load();
+          if (since != 0 && GetTickCount64() - since >= kEscHoldMs) {
+            g_esc_down_since.store(0);
             FireStop("esc");
           }
         } else {
@@ -363,11 +405,12 @@ int Show(const std::wstring& viewer, bool controlling) {
   DestroyAll();
   EnsureClass();
   // ติดตั้ง hook ตอนแถบขึ้น (= มี session อยู่) เท่านั้น — ไม่ดักอินพุตทั้งเครื่องทิ้งไว้ตลอดเวลา
-  // `Show()` ถูกเรียกซ้ำได้ตอนสลับ ดู↔ควบคุม จึงต้อง idempotent (InstallHooks เช็ค null ให้แล้ว)
+  // `Show()` ถูกเรียกซ้ำได้ตอนสลับ ดู↔ควบคุม จึงต้อง idempotent (InstallHooks เช็คให้แล้ว)
   InstallHooks();
   s.viewer = viewer;
   s.controlling = controlling;
-  s.esc_down_since = 0;
+  s.esc_down_since = 0;   // ทางถอย (ไม่มี hook)
+  g_esc_down_since.store(0);
   if (!had_session) s.started_at = GetTickCount64();
   EnumDisplayMonitors(nullptr, nullptr, AddBannerForMonitor, 0);
   return static_cast<int>(s.windows.size());
