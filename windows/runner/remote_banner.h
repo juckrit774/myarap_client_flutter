@@ -39,6 +39,12 @@ void Hide();
 //                เห็นค่าลงท้าย `-nohook` เมื่อไรแปลว่าเครื่องนั้นยังกันไม่ได้จริง
 void SetOnStop(std::function<void(const char*)> callback);
 
+// การกดปุ่มซ้ายครั้งล่าสุด "ถูกยิงเข้ามา" (จากฝั่งที่ควบคุมอยู่) หรือไม่
+//
+// 🔴 ใช้กัน **เดดล็อกของปุ่มย่อ/ขยาย/ปิด** — ดู `win32_window.cpp` `WM_NCLBUTTONDOWN`
+// คืน false เสมอเมื่อไม่มี session (ไม่ได้ติดตั้ง hook) → พฤติกรรมปกติไม่เปลี่ยน
+bool InjectedMouseDown();
+
 }  // namespace remote_banner
 
 #endif  // RUNNER_REMOTE_BANNER_H_

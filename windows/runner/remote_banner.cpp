@@ -63,6 +63,8 @@ DWORD g_hook_tid = 0;
 std::atomic<bool> g_hooks_ready{false};
 // ปุ่มซ้ายที่ปล่อยล่าสุด "ถูกยิงเข้ามา" หรือไม่ — WM_LBUTTONUP อ่านค่านี้แทน GetMessageExtraInfo
 std::atomic<bool> g_last_lbup_injected{false};
+// เช่นเดียวกันแต่ของ "กดลง" — ใช้กันเดดล็อกของปุ่มย่อ/ขยาย/ปิด (ดู `InjectedMouseDown`)
+std::atomic<bool> g_last_lbdown_injected{false};
 // เวลาที่ Esc (ของจริง ไม่ใช่ที่ถูกยิงเข้ามา) เริ่มถูกกดค้าง — 0 = ไม่ได้กดอยู่
 std::atomic<ULONGLONG> g_esc_down_since{0};
 
@@ -74,11 +76,16 @@ State& S() {
 // ⚠️ callback สองตัวนี้รันบน **เธรด hook** ไม่ใช่เธรดหลัก — แตะได้เฉพาะตัวแปร atomic
 // และต้องคืนค่าให้เร็วที่สุด (ทุก event ของทั้งเครื่องรออยู่)
 LRESULT CALLBACK LlMouseProc(int code, WPARAM wp, LPARAM lp) {
-  if (code == HC_ACTION && wp == WM_LBUTTONUP) {
+  if (code == HC_ACTION && (wp == WM_LBUTTONUP || wp == WM_LBUTTONDOWN)) {
     const auto* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(lp);
-    g_last_lbup_injected.store(
+    const bool injected =
         (ms->flags & LLMHF_INJECTED) != 0 ||
-        ms->dwExtraInfo == static_cast<ULONG_PTR>(kMyarapInjectedTag));
+        ms->dwExtraInfo == static_cast<ULONG_PTR>(kMyarapInjectedTag);
+    if (wp == WM_LBUTTONUP) {
+      g_last_lbup_injected.store(injected);
+    } else {
+      g_last_lbdown_injected.store(injected);
+    }
   }
   return CallNextHookEx(nullptr, code, wp, lp);
 }
@@ -420,6 +427,10 @@ void Hide() {
   DestroyAll();
   RemoveHooks();  // จบ session แล้วต้องเลิกดักอินพุตทั้งเครื่องทันที
   S().started_at = 0;
+}
+
+bool InjectedMouseDown() {
+  return g_hooks_ready.load() && g_last_lbdown_injected.load();
 }
 
 void SetOnStop(std::function<void(const char*)> callback) {

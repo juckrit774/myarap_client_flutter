@@ -3,6 +3,7 @@
 #include <dwmapi.h>
 #include <flutter_windows.h>
 
+#include "remote_banner.h"  // InjectedMouseDown — กันเดดล็อกปุ่ม ย่อ/ขยาย/ปิด
 #include "resource.h"
 
 namespace {
@@ -264,6 +265,42 @@ Win32Window::MessageHandler(HWND hwnd,
                    rect.bottom - rect.top, TRUE);
       }
       return 0;
+    }
+
+    case WM_NCLBUTTONDOWN: {
+      // 🔴🔴 **กันเดดล็อกของปุ่ม ย่อ/ขยาย/ปิด ตอนถูก remote control**
+      //
+      // `DefWindowProc` ของปุ่มพวกนี้เข้า **modal loop** ค้างรอ mouse-up (เพื่อทำ
+      // ปุ่มกดค้าง/ลากออกไปยกเลิก) · loop นี้รันบนเธรดหลัก ซึ่ง Flutter Windows ใช้
+      // เป็นเธรดเดียวกับที่ **Dart isolate รันอยู่**
+      //
+      // ฝั่งที่ควบคุมอยู่ยิงคลิกมาทาง data channel → Dart → `SendInput` · พอ mouse-down
+      // ทำให้เธรดเข้า modal loop ตัวที่จะยิง mouse-up ตามไปให้ (Dart) ก็ถูกบล็อกไปด้วย
+      // → **ค้างถาวร**: loop รอ up ที่มีแต่เธรดที่ถูกบล็อกเท่านั้นที่สร้างได้
+      //
+      // ยืนยันจากของจริง: agent เงียบสนิททันทีที่คลิกลงปุ่ม ✕ — ไม่มี screenshot/heartbeat
+      // อีกเลยแม้แต่รายการเดียว ทั้งที่ก่อนหน้านั้นส่งทุกครึ่งวินาที
+      //
+      // ⚠️ เป็นเฉพาะ **หน้าต่างของ agent เอง** — แอปอื่น modal loop อยู่คนละ process
+      // เธรดของเราจึงว่างพอจะยิง mouse-up ให้ได้ตามปกติ (ตรงกับที่ผู้ใช้รายงานเป๊ะ)
+      //
+      // แก้: คลิกที่ **ถูกยิงเข้ามา** ไม่ต้องเข้า modal loop — สั่งงานตรง ๆ แล้วจบ
+      // (คลิกจริงจากคนหน้าเครื่องยังทำงานแบบเดิมทุกอย่าง รวมถึงลากออกไปยกเลิก)
+      if (remote_banner::InjectedMouseDown()) {
+        UINT cmd = 0;
+        if (wparam == HTCLOSE) {
+          cmd = SC_CLOSE;
+        } else if (wparam == HTMINBUTTON) {
+          cmd = SC_MINIMIZE;
+        } else if (wparam == HTMAXBUTTON) {
+          cmd = ::IsZoomed(window_handle_) ? SC_RESTORE : SC_MAXIMIZE;
+        }
+        if (cmd != 0) {
+          PostMessage(window_handle_, WM_SYSCOMMAND, cmd, 0);
+          return 0;  // ไม่ส่งต่อให้ DefWindowProc = ไม่เข้า modal loop
+        }
+      }
+      break;  // กรณีอื่น (ลากแถบชื่อ ฯลฯ) ปล่อยตามปกติ
     }
 
     case WM_ACTIVATE:
