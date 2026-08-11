@@ -73,6 +73,15 @@ class HomeViewModel extends ChangeNotifier {
   // WebRTC (low-latency upgrade) — สร้างเมื่อได้ SDP offer จาก viewer ผ่าน SSE
   RTCPeerConnection? _remotePc;
   MediaStream? _remoteScreenStream;
+  // ── ตัวติดตามสถานะ WebRTC (ไว้ตอบว่า "ทำไมหลุด") ─────────────────────────
+  //
+  // ฝั่ง viewer เห็นแค่ว่าหลุด แต่แยกไม่ออกว่า ICE ขาด / DTLS ตาย / agent รื้อเอง
+  // เคสจริงที่ยังหาสาเหตุไม่ได้: กดปุ่มย่อ/ขยาย/ปิดหน้าต่าง agent บน **Windows** แล้ว
+  // ควบคุมต่อไม่ได้อีกเลย ทั้งที่ภาพยังมาปกติ (= peer connection ตาย, HTTP polling รอด)
+  DateTime? _remotePcConnectedAt; // ต่อติดล่าสุดเมื่อไร — ใช้บอกว่าหลุดหลังต่อติดกี่วินาที
+  String _remotePcLastState = ''; // กันรายงานซ้ำสถานะเดิม
+  String _remoteIceState = ''; // สถานะ ICE ล่าสุด — แนบไปกับรายงานทุกใบ
+  bool _remoteTearingDown = false; // เรากำลังรื้อ pc เอง ≠ ถูกตัดจากภายนอก
   // ตอน WebRTC ต่อติด: ลด HTTP frame upload เหลือ interval ช้า (fallback + keep-alive)
   static const _remoteFrameIntervalSlow = Duration(seconds: 3);
   // interval ระหว่างเฟรม (~2.5 fps) — สมดุลระหว่าง smoothness กับ bandwidth/CPU
@@ -1355,6 +1364,11 @@ $result | ConvertTo-Json -Compress -Depth 4
       return;
     }
     await _stopWebrtc(); // ทิ้ง pc เก่าถ้ามี (offer ใหม่ทับ)
+    // pc รอบใหม่ = เริ่มนับสถานะกันใหม่หมด (ไม่งั้นรายงานรอบถัดไปอ้างอิงค่าของ pc ที่ตายแล้ว)
+    _remoteTearingDown = false;
+    _remotePcLastState = '';
+    _remoteIceState = '';
+    _remotePcConnectedAt = null;
     try {
       final pc = await createPeerConnection({
         'iceServers': [
@@ -1403,7 +1417,13 @@ $result | ConvertTo-Json -Compress -Depth 4
         _remoteInputDc = channel;
         channel.onMessage = (msg) => _onRemoteInput(msg.text);
       };
+      // 🔴 รายงานทุกการเปลี่ยนสถานะกลับ backend — จุดเดียวที่จะบอกได้ว่า "หลุดเพราะอะไร"
+      pc.onIceConnectionState = (state) {
+        _remoteIceState = _shortRtcState(state.name);
+        _rlog('ice=$_remoteIceState');
+      };
       pc.onConnectionState = (state) {
+        _reportPcState(sessionId, state);
         if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
           // media ไหล P2P แล้ว — ลด HTTP upload เหลือ keep-alive (ประหยัด bandwidth/CPU)
           _remoteCaptureTimer?.cancel();
@@ -1452,7 +1472,53 @@ $result | ConvertTo-Json -Compress -Depth 4
     await done.future.timeout(const Duration(seconds: 3), onTimeout: () {});
   }
 
+  /// ตัดคำนำหน้ายาว ๆ ของ enum ออกให้อ่านออกใน log
+  /// (`RTCPeerConnectionStateDisconnected` → `Disconnected`)
+  ///
+  /// ⚠️ ค่าของ data channel ขึ้นต้นว่า `RTCDataChannelOpen` **ไม่ใช่** `RTCDataChannelStateOpen`
+  /// (ชื่อ enum กับชื่อค่าไม่ตรงกันในแพ็กเกจนี้) — ตัดด้วยสตริงผิดแล้วจะได้ชื่อเต็มติดมาทั้งดุ้น
+  String _shortRtcState(String name) => name
+      .replaceFirst('RTCPeerConnectionState', '')
+      .replaceFirst('RTCIceConnectionState', '')
+      .replaceFirst('RTCDataChannel', '');
+
+  /// รายงานทุกครั้งที่สถานะ peer connection เปลี่ยน — ลง log ที่เครื่อง **และ** ส่งกลับ backend
+  ///
+  /// ทำไมต้องส่งกลับ: เข้าไปอ่าน log ที่เครื่องผู้ใช้จากระยะไกลไม่ได้ · ที่ผ่านมา `_remoteDiag`
+  /// รายงานแค่ตอน **ตั้งค่า** (constraints/answer_sent/webrtc_failed) พอ session ต่อติดแล้ว
+  /// ตายกลางทางจึงไม่เหลือร่องรอยอะไรเลย — เห็นแต่ผลลัพธ์ว่า "คุมไม่ได้แล้ว"
+  ///
+  /// ค่าที่แนบไปคือชุดที่แยกสมมติฐานออกจากกันได้จริง:
+  ///   · `ice=` ICE ขาด (เครือข่าย/เส้นทาง) ≠ DTLS ตายทั้งที่ ICE ยังดี
+  ///   · `dc=`  data channel ตายก่อนหรือหลัง pc (ควบคุมตายพร้อมช่องนี้)
+  ///   · `หลังต่อติด` เวลาที่ผ่านไป — ใช้จับคู่กับสิ่งที่แอดมินเพิ่งกดบน viewer
+  ///   · `ต้นทาง` เรารื้อเอง (`_stopWebrtc`) หรือถูกตัดจากภายนอก — **แยกสองอย่างนี้ให้ออกก่อน**
+  ///     ไม่งั้นไล่ผิดทางตั้งแต่ต้น
+  void _reportPcState(String sessionId, RTCPeerConnectionState state) {
+    final now = _shortRtcState(state.name);
+    if (now == _remotePcLastState) return; // สถานะเดิมซ้ำ — ไม่มีข้อมูลใหม่
+    final prev = _remotePcLastState.isEmpty ? '(เริ่ม)' : _remotePcLastState;
+    _remotePcLastState = now;
+    if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+      _remotePcConnectedAt = DateTime.now();
+    }
+    final since = _remotePcConnectedAt == null
+        ? 'ยังไม่เคยต่อติด'
+        : 'หลังต่อติด ${DateTime.now().difference(_remotePcConnectedAt!).inSeconds}s';
+    final dc = _remoteInputDc?.state;
+    final detail = '$prev→$now · $since'
+        ' · ice=${_remoteIceState.isEmpty ? 'n/a' : _remoteIceState}'
+        ' · dc=${dc == null ? 'none' : _shortRtcState(dc.name)}'
+        ' · ควบคุม=${_remoteControlGranted ? 'อนุญาตแล้ว' : 'ยังไม่'}'
+        ' · ต้นทาง=${_remoteTearingDown ? 'agent รื้อเอง' : 'จากภายนอก'}';
+    _rlog('pcstate $detail');
+    _remoteDiag(sessionId, 'pcstate', detail);
+  }
+
   Future<void> _stopWebrtc() async {
+    // ตั้งธงก่อนปิด — callback `closed` มาทีหลังแบบ async ถ้าไม่ตั้งไว้ก่อนจะถูกรายงาน
+    // ว่า "ถูกตัดจากภายนอก" ทั้งที่เรารื้อเอง (ปลดธงตอนสร้าง pc ใหม่ใน `_onRemoteOffer`)
+    _remoteTearingDown = true;
     try {
       for (final t in _remoteScreenStream?.getTracks() ?? <MediaStreamTrack>[]) {
         await t.stop();
