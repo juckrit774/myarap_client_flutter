@@ -14,7 +14,12 @@ namespace remote_banner {
 namespace {
 
 constexpr wchar_t kClassName[] = L"MYARAP_REMOTE_BANNER";
-constexpr int kWidth = 470;
+// ⚠️ **ห้ามกลับไป fix ความกว้างตายตัว** — ของเดิม 470px ทำให้ข้อความไทยตอนถูกควบคุม
+// ("<ชื่อ> กำลังควบคุมเมาส์และคีย์บอร์ดของเครื่องนี้") ล้นไปทับทั้งตัวนับเวลาและปุ่ม "หยุด"
+// จนอ่านไม่ออกและกดปุ่มพลาด · ความยาวขึ้นกับ **ชื่อผู้ดูแล** ซึ่งยาวแค่ไหนก็ได้
+// → วัดข้อความจริงแล้วค่อยกำหนดความกว้าง (ดู `ComputeLayout`)
+constexpr int kMinWidth = 470;   // สั้นกว่านี้ไม่ต้องหด — คงสัดส่วนเดิมไว้
+constexpr int kMaxWidth = 980;   // ยาวกว่านี้ตัดข้อความด้วย … แทนการยืดจนล้นจอ
 constexpr int kHeight = 40;
 constexpr int kRadius = 9;
 constexpr UINT_PTR kTimerId = 1;
@@ -25,13 +30,23 @@ constexpr int kEscHoldMs = 2000;
 // ใน lib/core/services/remote_input_windows.dart
 constexpr LPARAM kMyarapInjectedTag = 0x4D594152;
 
-// กรอบปุ่ม "หยุด" — ใช้ทั้งตอนวาดและตอน hit-test ต้องเป็นค่าเดียวกันเสมอ
-constexpr int kBtnX = 378, kBtnY = 6, kBtnW = 80, kBtnH = 28;
+// กรอบปุ่ม "หยุด" — ตำแหน่ง x คำนวณตามความกว้างจริง (เก็บใน State) ห้าม hardcode
+// เพราะใช้ทั้งตอนวาดและตอน hit-test ถ้าสองที่ไม่ตรงกันจะกดปุ่มไม่โดน
+constexpr int kBtnY = 6, kBtnW = 80, kBtnH = 28;
+// ระยะห่างในแถบ: [12 จุด 27][30 ข้อความ ...][ช่องว่าง][เวลา][ช่องว่าง][ปุ่ม][ขอบขวา]
+constexpr int kPadLeft = 30;
+constexpr int kGapTextClock = 18;
+constexpr int kClockW = 52;
+constexpr int kGapClockBtn = 12;
+constexpr int kPadRight = 12;
 
 struct State {
   std::vector<HWND> windows;
   std::wstring viewer;
   bool controlling = false;
+  // ── เลย์เอาต์ที่คำนวณจากข้อความจริง (ตั้งใน ComputeLayout ก่อนสร้างหน้าต่างเสมอ) ──
+  std::wstring tail;      // ข้อความต่อท้ายชื่อ — ตัดด้วย … แล้วถ้ายาวเกิน kMaxWidth
+  int width = kMinWidth;  // ความกว้างที่ "ขอ" ตอนสร้างหน้าต่าง (จอแคบอาจได้น้อยกว่านี้)
   // เวลาเริ่ม session — 0 = ไม่มี session อยู่
   ULONGLONG started_at = 0;
   ULONGLONG esc_down_since = 0;
@@ -196,6 +211,75 @@ HFONT MakeFont(int height, int weight, const wchar_t* face) {
                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
 }
 
+// ตำแหน่งเวลา/ปุ่ม คิดจาก **ความกว้างจริงของหน้าต่าง** เสมอ ไม่ใช่จากค่าที่คำนวณตอนสร้าง
+// (จอแคบทำให้หน้าต่างถูกหดลงกว่าที่ขอ — ถ้าอิงค่าเดิม ตอนวาดกับตอน hit-test จะคนละที่
+// แล้วกดปุ่มไม่โดน ซึ่งเป็นบั๊กที่หาสาเหตุยากมาก)
+struct Layout {
+  int btn_x;
+  int clock_x;
+};
+Layout LayoutOf(HWND hwnd) {
+  RECT rc;
+  GetClientRect(hwnd, &rc);
+  Layout l{};
+  l.btn_x = rc.right - kPadRight - kBtnW;
+  l.clock_x = l.btn_x - kGapClockBtn - kClockW;
+  return l;
+}
+
+// วัดข้อความจริงด้วยฟอนต์ชุดเดียวกับตอนวาด แล้วกำหนดความกว้างของแถบ
+//
+// ต้องเรียก **ก่อนสร้างหน้าต่าง** ทุกครั้ง (ความยาวเปลี่ยนได้ทั้งจากชื่อผู้ดูแลและจาก
+// การสลับ ดู↔ควบคุม ซึ่งข้อความยาวไม่เท่ากัน)
+void ComputeLayout() {
+  auto& s = S();
+  s.tail = s.controlling ? L" กำลังควบคุมเมาส์และคีย์บอร์ดของเครื่องนี้"
+                         : L" กำลังดูหน้าจอของคุณ";
+
+  HDC dc = GetDC(nullptr);
+  HFONT bold = MakeFont(-15, FW_BOLD, L"Segoe UI");
+  HFONT regular = MakeFont(-15, FW_NORMAL, L"Segoe UI");
+
+  HFONT old = static_cast<HFONT>(SelectObject(dc, bold));
+  SIZE name_sz{};
+  GetTextExtentPoint32W(dc, s.viewer.c_str(),
+                        static_cast<int>(s.viewer.size()), &name_sz);
+  SelectObject(dc, regular);
+
+  const int fixed = kPadLeft + kGapTextClock + kClockW + kGapClockBtn + kBtnW +
+                    kPadRight;
+  const int room = kMaxWidth - fixed - name_sz.cx;  // ที่เหลือให้ข้อความต่อท้าย
+
+  SIZE tail_sz{};
+  GetTextExtentPoint32W(dc, s.tail.c_str(), static_cast<int>(s.tail.size()),
+                        &tail_sz);
+  // ยาวเกินเพดาน → ตัดทีละตัวแล้วเติม … (ตัดจากท้าย ชื่อผู้ดูแลต้องอยู่ครบเสมอ
+  // เพราะเป็นข้อมูลสำคัญที่สุดบนแถบ — ผู้ใช้ต้องรู้ว่า "ใคร" กำลังยุ่งกับเครื่อง)
+  if (room > 0 && tail_sz.cx > room) {
+    std::wstring cut = s.tail;
+    while (!cut.empty()) {
+      cut.pop_back();
+      const std::wstring probe = cut + L"…";
+      GetTextExtentPoint32W(dc, probe.c_str(), static_cast<int>(probe.size()),
+                            &tail_sz);
+      if (tail_sz.cx <= room) {
+        s.tail = probe;
+        break;
+      }
+    }
+  }
+
+  SelectObject(dc, old);
+  DeleteObject(bold);
+  DeleteObject(regular);
+  ReleaseDC(nullptr, dc);
+
+  int w = fixed + name_sz.cx + tail_sz.cx;
+  if (w < kMinWidth) w = kMinWidth;
+  if (w > kMaxWidth) w = kMaxWidth;
+  s.width = w;
+}
+
 void PaintBanner(HWND hwnd) {
   auto& s = S();
   PAINTSTRUCT ps;
@@ -239,12 +323,11 @@ void PaintBanner(HWND hwnd) {
   const int text_y = (kHeight - name_sz.cy) / 2;
   TextOutW(dc, 30, text_y, s.viewer.c_str(), static_cast<int>(s.viewer.size()));
 
-  const std::wstring tail = s.controlling
-                                ? L" กำลังควบคุมเมาส์และคีย์บอร์ดของเครื่องนี้"
-                                : L" กำลังดูหน้าจอของคุณ";
+  // ข้อความต่อท้าย (ตัดด้วย … มาแล้วถ้าจำเป็น) มาจาก ComputeLayout — ต้องเป็นตัวเดียว
+  // กับที่ใช้วัดความกว้าง ไม่งั้นกลับไปล้นเหมือนเดิม
   SelectObject(dc, regular);
-  TextOutW(dc, 30 + name_sz.cx, text_y, tail.c_str(),
-           static_cast<int>(tail.size()));
+  TextOutW(dc, kPadLeft + name_sz.cx, text_y, s.tail.c_str(),
+           static_cast<int>(s.tail.size()));
 
   // เวลาที่ถูกดูมาแล้ว ชิดขวาก่อนถึงปุ่ม
   const ULONGLONG ms =
@@ -253,14 +336,15 @@ void PaintBanner(HWND hwnd) {
   wchar_t clock[16];
   swprintf_s(clock, L"%02d:%02d", total_s / 60, total_s % 60);
   SelectObject(dc, mono);
-  RECT clock_rc{296, 0, 366, kHeight};
+  const Layout lay = LayoutOf(hwnd);
+  RECT clock_rc{lay.clock_x, 0, lay.clock_x + kClockW, kHeight};
   DrawTextW(dc, clock, -1, &clock_rc,
             DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
 
   // ปุ่มขาวตัวอักษรสีเดียวกับแถบ — ปุ่มสีจางจมหายไปกับพื้นไล่สี ทั้งที่เป็นสิ่งเดียว
   // ในแถบนี้ที่ผู้ใช้ต้องกดติดตั้งแต่ครั้งแรก
   HBRUSH btn_br = CreateSolidBrush(RGB(255, 255, 255));
-  RECT btn{kBtnX, kBtnY, kBtnX + kBtnW, kBtnY + kBtnH};
+  RECT btn{lay.btn_x, kBtnY, lay.btn_x + kBtnW, kBtnY + kBtnH};
   HRGN btn_rgn = CreateRoundRectRgn(btn.left, btn.top, btn.right + 1,
                                     btn.bottom + 1, 12, 12);
   FillRgn(dc, btn_rgn, btn_br);
@@ -302,7 +386,8 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       }
       const int x = GET_X_LPARAM(lp);
       const int y = GET_Y_LPARAM(lp);
-      if (x >= kBtnX && x <= kBtnX + kBtnW && y >= kBtnY &&
+      const Layout lay = LayoutOf(hwnd);
+      if (x >= lay.btn_x && x <= lay.btn_x + kBtnW && y >= kBtnY &&
           y <= kBtnY + kBtnH) {
         FireStop(g_hooks_ready.load() ? "btn" : "btn-nohook");
       }
@@ -318,7 +403,8 @@ LRESULT CALLBACK BannerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       auto& s = S();
       // วาดใหม่เฉพาะกรอบตัวเลขเวลา ไม่ใช่ทั้งแถบ — ทั้งแถบทุก 250ms จะเห็นกะพริบ
       // (WM_PAINT clip ตามกรอบนี้ ส่วนพื้นไล่สีจึงถูกวาดทับเฉพาะที่จำเป็น)
-      RECT clock_rc{296, 0, 366, kHeight};
+      const Layout lay = LayoutOf(hwnd);
+      RECT clock_rc{lay.clock_x, 0, lay.clock_x + kClockW, kHeight};
       InvalidateRect(hwnd, &clock_rc, FALSE);
 
       // Esc ค้าง — เฉพาะตอนถูกควบคุม เพราะปุ่มหยุดต้องใช้เมาส์ซึ่งอยู่ในมือคนอื่น
@@ -372,18 +458,19 @@ BOOL CALLBACK AddBannerForMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM) {
   mi.cbSize = sizeof(mi);
   if (!GetMonitorInfo(monitor, &mi)) return TRUE;
 
-  const int x =
-      mi.rcMonitor.left + (mi.rcMonitor.right - mi.rcMonitor.left) / 2 -
-      kWidth / 2;
+  // ⚠️ จอที่แคบกว่าแถบ (หรือ scale สูง) — หดให้พอดีจอนั้น ไม่งั้นปุ่ม "หยุด" หลุดออกนอกจอ
+  const int mon_w = mi.rcMonitor.right - mi.rcMonitor.left;
+  const int w = S().width < mon_w - 24 ? S().width : mon_w - 24;
+  const int x = mi.rcMonitor.left + mon_w / 2 - w / 2;
   const int y = mi.rcMonitor.top + 6;
 
   HWND hwnd = CreateWindowExW(
       WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"",
-      WS_POPUP, x, y, kWidth, kHeight, nullptr, nullptr,
+      WS_POPUP, x, y, w, kHeight, nullptr, nullptr,
       GetModuleHandle(nullptr), nullptr);
   if (!hwnd) return TRUE;
 
-  HRGN rgn = CreateRoundRectRgn(0, 0, kWidth + 1, kHeight + 1, kRadius * 2,
+  HRGN rgn = CreateRoundRectRgn(0, 0, w + 1, kHeight + 1, kRadius * 2,
                                 kRadius * 2);
   SetWindowRgn(hwnd, rgn, TRUE);  // ระบบเป็นเจ้าของ rgn หลังจากนี้ ห้าม DeleteObject
 
@@ -419,6 +506,7 @@ int Show(const std::wstring& viewer, bool controlling) {
   s.esc_down_since = 0;   // ทางถอย (ไม่มี hook)
   g_esc_down_since.store(0);
   if (!had_session) s.started_at = GetTickCount64();
+  ComputeLayout();  // ต้องมาก่อนสร้างหน้าต่าง — ขนาดหน้าต่างขึ้นกับผลลัพธ์ตรงนี้
   EnumDisplayMonitors(nullptr, nullptr, AddBannerForMonitor, 0);
   return static_cast<int>(s.windows.size());
 }

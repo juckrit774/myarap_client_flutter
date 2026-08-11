@@ -1,6 +1,6 @@
 [Setup]
 AppName=MyARAP
-AppVersion=1.0.0.21
+AppVersion=1.0.0.22
 AppPublisher=ARSoft Mobile
 DefaultDirName={autopf}\MyARAP
 DefaultGroupName=MyARAP
