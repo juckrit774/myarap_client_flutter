@@ -263,6 +263,9 @@ class HomeViewModel extends ChangeNotifier {
                 'installLocation': app.installLocation,
                 'architecture': app.architecture,
                 'packageId': app.packageId,
+                // สัญญาณดิบของ Appx — server เก็บไว้ก่อน ยังไม่เอาไปตัดสิน source
+                'nonRemovable': app.nonRemovable,
+                'signatureKind': app.signatureKind,
               })
           .toList();
       await NetworkManager.instance.putV3('/v3/api/device/software', {'software': items});

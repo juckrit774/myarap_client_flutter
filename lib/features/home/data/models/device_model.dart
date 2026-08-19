@@ -69,6 +69,11 @@ class ApplicationInfo {
   /// · macOS: `CFBundleIdentifier`
   final String packageId;
 
+  /// สัญญาณดิบของ Appx (Windows เท่านั้น) — ใช้ประกอบการตัดสินฝั่ง server ว่าอันไหน
+  /// "ติดมากับเครื่อง" · ยังไม่มีผลกับ `source` จนกว่าจะเห็นข้อมูลจริงจากหลายเครื่อง
+  final bool nonRemovable;
+  final String signatureKind;
+
   const ApplicationInfo({
     required this.name,
     required this.version,
@@ -79,6 +84,8 @@ class ApplicationInfo {
     this.installLocation = '',
     this.architecture = '',
     this.packageId = '',
+    this.nonRemovable = false,
+    this.signatureKind = '',
   });
 }
 
@@ -371,6 +378,8 @@ class DeviceDetail {
               installLocation: item['installLocation'] as String? ?? '',
               architecture: item['architecture'] as String? ?? '',
               packageId: item['packageId'] as String? ?? '',
+              nonRemovable: item['nonRemovable'] as bool? ?? false,
+              signatureKind: item['signatureKind'] as String? ?? '',
             ));
           }
         }
@@ -549,7 +558,14 @@ $apps += @(Get-AppxPackage -ErrorAction SilentlyContinue |
         name            = $dn
         version         = $_.Version.ToString()
         size            = 0
-        publisher       = if ($_.Publisher) { ($_.Publisher -replace '^CN=([^,]+).*$', '$1').Trim() } else { '' }
+        # Publisher ของ Appx เป็น DN เช่น "CN=Microsoft Corporation, O=..., C=US" -> เอา CN
+        # BUT some packages carry a GUID as CN (AppUp.IntelGraphicsExperience ->
+        # "CN=EB51A5DA-0E72-4863-82E4-EA21C1F8DFE3"). A GUID is not a publisher name and
+        # showing it to a human is worse than showing nothing -> emit ''.
+        publisher       = $(
+          $cn = if ($_.Publisher) { ($_.Publisher -replace '^CN=([^,]+).*$', '$1').Trim() } else { '' }
+          if ($cn -match '^\{?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}?$') { '' } else { $cn }
+        )
         # Appx has no install date at all - leave blank rather than inventing one from
         # the folder timestamp, which changes on every app update.
         installDate     = ''
@@ -562,6 +578,16 @@ $apps += @(Get-AppxPackage -ErrorAction SilentlyContinue |
         # Microsoft.BingNews carry publisher "Microsoft Corporation" exactly like
         # user-installed ones (MSTeams), so the name/publisher tells us nothing.
         source    = if ($_.SignatureKind -eq 'System') { 'system' } else { 'store' }
+        # ── สัญญาณดิบสำหรับแยก "Appx ที่มากับเครื่อง" ออกจาก "ที่คนโหลดเอง" ──
+        # ปัญหาที่พบจริง 2026-08-19: `SignatureKind` แยกไม่ออก — ของที่ OEM/Microsoft ใส่มากับ
+        # image (Intel Graphics, BingWeather, Clipchamp) เซ็นแบบ Store เหมือนที่คนโหลดเองเป๊ะ
+        # ผลคือ **61 จาก 89 รายการที่รอกำหนดนโยบายบนเครื่องหนึ่งเป็น Appx ที่ติดมากับ Windows**
+        #
+        # ยังไม่เปลี่ยนกติกา `source` ตรงนี้ — ส่งสัญญาณดิบขึ้นไปก่อนแล้วดูข้อมูลจริงจากหลายเครื่อง
+        # ค่อยตัดสิน (หลักเดียวกับที่ ITIL ว่าไว้: discovery เก็บให้ครบ ตัดสินใจที่ server)
+        # ⚠️ ทั้งสอง property ไม่มีใน Windows รุ่นเก่า -> ใช้ -ErrorAction/ternary กัน error
+        nonRemovable = $(try { [bool]$_.NonRemovable } catch { $false })
+        signatureKind = if ($_.SignatureKind) { $_.SignatureKind.ToString() } else { '' }
       }
     }
   })
