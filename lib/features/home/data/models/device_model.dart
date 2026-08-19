@@ -49,12 +49,36 @@ class ApplicationInfo {
   /// ว่าง = ยังไม่รู้ → ฝั่ง backend จะถือเป็น user เพื่อไม่ให้พฤติกรรมเดิมเปลี่ยน
   final String source;
 
+  // ---- IMPL-15 Phase 3 — field ตามสเปก SOFTWARE INSTALLATION SYNC ----
+  // ทั้ง 4 ตัวเป็น **optional** ทั้งฝั่ง agent และ backend: agent รุ่นเก่าไม่ส่ง = ค่าว่าง
+  // ห้ามทำให้ contract เดิมพัง (กฎข้อ 1 ของโปรเจกต์)
+
+  /// วันที่ติดตั้ง `yyyy-MM-dd` — Windows: registry `InstallDate` (บางตัวไม่เขียนไว้)
+  /// ⚠️ **macOS ไม่มีข้อมูลนี้** และจงใจไม่ใช้เวลาแก้ไขไฟล์แทน เพราะมันเปลี่ยนทุกครั้ง
+  /// ที่แอปอัปเดต — จะกลายเป็น "วันที่อัปเดตล่าสุด" ไม่ใช่ "วันที่ติดตั้ง"
+  final String installDate;
+
+  /// path ที่ติดตั้ง — Windows: registry `InstallLocation` · macOS: path ของ .app
+  final String installLocation;
+
+  /// x86 | x64 | arm64 | … — Windows: อนุมานจาก registry hive ที่เจอ (Wow6432Node = x86)
+  /// · Appx: property `Architecture` · macOS: `Bundle.executableArchitectures`
+  final String architecture;
+
+  /// ตัวระบุแพ็กเกจ — Windows MSI: ProductCode GUID (ชื่อ subkey) · Appx: PackageFullName
+  /// · macOS: `CFBundleIdentifier`
+  final String packageId;
+
   const ApplicationInfo({
     required this.name,
     required this.version,
     required this.size,
     this.publisher = '',
     this.source = '',
+    this.installDate = '',
+    this.installLocation = '',
+    this.architecture = '',
+    this.packageId = '',
   });
 }
 
@@ -255,6 +279,10 @@ class DeviceDetail {
               size: am['size'] as int? ?? 0,
               publisher: am['publisher'] as String? ?? '',
               source: am['source'] as String? ?? '',
+              installDate: am['installDate'] as String? ?? '',
+              installLocation: am['installLocation'] as String? ?? '',
+              architecture: am['architecture'] as String? ?? '',
+              packageId: am['packageId'] as String? ?? '',
             ));
           }
         }
@@ -339,6 +367,10 @@ class DeviceDetail {
               size: (item['size'] as num?)?.toInt() ?? 0,
               publisher: item['publisher'] as String? ?? '',
               source: item['source'] as String? ?? '',
+              installDate: item['installDate'] as String? ?? '',
+              installLocation: item['installLocation'] as String? ?? '',
+              architecture: item['architecture'] as String? ?? '',
+              packageId: item['packageId'] as String? ?? '',
             ));
           }
         }
@@ -470,6 +502,9 @@ $regPaths = @(
 )
 $seen = @{}
 $apps = @(foreach ($path in $regPaths) {
+  # Wow6432Node = 32-bit view of the registry -> the app itself is x86.
+  # NOTE: use a distinct name, `$arch` is already the OS architecture above.
+  $appArch = if ($path -like '*Wow6432Node*') { 'x86' } else { 'x64' }
   Get-ItemProperty $path -ErrorAction SilentlyContinue |
     Where-Object { $_.DisplayName -and $_.DisplayName.Trim() -ne '' } |
     ForEach-Object {
@@ -479,12 +514,24 @@ $apps = @(foreach ($path in $regPaths) {
         # SystemComponent=1 or ParentKeyName set = runtime/redistributable hidden from
         # Add/Remove Programs (VC++ Redist, .NET runtime) -> classify as system
         $isSys = ($_.SystemComponent -eq 1) -or ($_.ParentKeyName -ne $null)
+        # InstallDate is stored as 'yyyyMMdd' (no separators, no time). Some installers
+        # write garbage or leave it out entirely -> emit '' rather than a wrong date.
+        $inst = ''
+        if ($_.InstallDate -and $_.InstallDate -match '^\d{8}$') {
+          $inst = $_.InstallDate.Substring(0,4) + '-' + $_.InstallDate.Substring(4,2) + '-' + $_.InstallDate.Substring(6,2)
+        }
         @{
-          name      = $name
-          version   = if ($_.DisplayVersion) { $_.DisplayVersion } else { '' }
-          size      = [long]($_.EstimatedSize) * 1024
-          publisher = if ($_.Publisher) { $_.Publisher.Trim() } else { '' }
-          source    = if ($isSys) { 'system' } else { 'user' }
+          name            = $name
+          version         = if ($_.DisplayVersion) { $_.DisplayVersion } else { '' }
+          size            = [long]($_.EstimatedSize) * 1024
+          publisher       = if ($_.Publisher) { $_.Publisher.Trim() } else { '' }
+          source          = if ($isSys) { 'system' } else { 'user' }
+          installDate     = $inst
+          installLocation = if ($_.InstallLocation) { $_.InstallLocation.Trim() } else { '' }
+          architecture    = $appArch
+          # PSChildName = the Uninstall subkey name, which for MSI packages is the
+          # ProductCode GUID -> doubles as both Package ID and Product ID.
+          packageId       = if ($_.PSChildName) { $_.PSChildName } else { '' }
         }
       }
     }
@@ -499,10 +546,16 @@ $apps += @(Get-AppxPackage -ErrorAction SilentlyContinue |
     if (-not $seen[$dn]) {
       $seen[$dn] = $true
       @{
-        name      = $dn
-        version   = $_.Version.ToString()
-        size      = 0
-        publisher = if ($_.Publisher) { ($_.Publisher -replace '^CN=([^,]+).*$', '$1').Trim() } else { '' }
+        name            = $dn
+        version         = $_.Version.ToString()
+        size            = 0
+        publisher       = if ($_.Publisher) { ($_.Publisher -replace '^CN=([^,]+).*$', '$1').Trim() } else { '' }
+        # Appx has no install date at all - leave blank rather than inventing one from
+        # the folder timestamp, which changes on every app update.
+        installDate     = ''
+        installLocation = if ($_.InstallLocation) { $_.InstallLocation } else { '' }
+        architecture    = if ($_.Architecture) { $_.Architecture.ToString().ToLower() } else { '' }
+        packageId       = if ($_.PackageFullName) { $_.PackageFullName } else { '' }
         # SignatureKind is Windows' own classification - System = shipped with the OS.
         # Store / Developer / Enterprise = someone chose to install it.
         # Do NOT guess from the package name or publisher: preinstalled apps such as

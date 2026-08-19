@@ -293,6 +293,23 @@ class MacDeviceInfo {
     return ""
   }
 
+  // สถาปัตยกรรมของแอป — `Bundle.executableArchitectures` เป็น public API และอ่านได้ใน
+  // sandbox (ไม่ต้องแกะ Mach-O header เอง) · แอปที่เป็น universal จะคืนมาทั้งสองค่า
+  private static func architectureOf(_ url: URL) -> String {
+    guard let raw = Bundle(url: url)?.executableArchitectures else { return "" }
+    let archs = raw.map { $0.intValue }
+    var names: [String] = []
+    // ⚠️ ใช้ค่าดิบแทน `NSBundleExecutableArchitectureARM64` เพราะสัญลักษณ์นั้นมีตั้งแต่
+    // macOS 11 แต่ deployment target ของโปรเจกต์นี้คือ 10.15 → คอมไพล์ไม่ผ่าน
+    // ค่า = CPU_TYPE_ARM64 (0x0100000C) ซึ่งคงที่ ไม่เปลี่ยนตามเวอร์ชัน OS
+    let archARM64 = 0x0100000C
+    if archs.contains(archARM64)                            { names.append("arm64") }
+    if archs.contains(NSBundleExecutableArchitectureX86_64) { names.append("x86_64") }
+    if archs.contains(NSBundleExecutableArchitectureI386)   { names.append("i386") }
+    if names.count > 1 { return "universal" }
+    return names.first ?? ""
+  }
+
   private static func getAllApplications() -> [[String: Any]] {
     let fm = FileManager.default
     // รวมทุก location: /Applications, /System/Applications, ~/Applications
@@ -344,10 +361,19 @@ class MacDeviceInfo {
         seen.insert(name)
         // Mac App Store ฝากไฟล์ receipt ไว้ — ใช้แยก store ออกจาก user ที่ลงเอง
         let isStore = fm.fileExists(atPath: url.appendingPathComponent("Contents/_MASReceipt/receipt").path)
+        // IMPL-15 Phase 3 — bundle id + path + architecture
+        // ⚠️ **ไม่มี installDate ให้ส่ง** และจงใจไม่ใช้ creation/modification date ของโฟลเดอร์
+        // แทน เพราะมันถูกเขียนใหม่ทุกครั้งที่แอปอัปเดต → จะกลายเป็น "วันที่อัปเดตล่าสุด"
+        // ซึ่งเป็นคนละความหมายกับที่สเปกขอ (ดู REQ-09 §4 field #7)
+        let bundleID = (NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist"))?["CFBundleIdentifier"] as? String) ?? ""
         result.append([
           "name": name, "version": version, "size": size,
           "publisher": publisherOf(url),
           "source": isStore ? "store" : source,
+          "installDate": "",
+          "installLocation": url.path,
+          "architecture": architectureOf(url),
+          "packageId": bundleID,
         ])
       }
     }

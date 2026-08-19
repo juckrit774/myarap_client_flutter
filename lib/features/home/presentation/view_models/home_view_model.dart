@@ -257,6 +257,12 @@ class HomeViewModel extends ChangeNotifier {
                 'version': app.version,
                 'size': app.size,
                 'source': app.source,
+                // IMPL-15 Phase 3 — ส่งเท่าที่แพลตฟอร์มนั้นมีจริง ค่าที่ไม่มีส่งเป็น ''
+                // backend เก็บตามที่ได้ ไม่เดาแทน (macOS ไม่มี installDate)
+                'installDate': app.installDate,
+                'installLocation': app.installLocation,
+                'architecture': app.architecture,
+                'packageId': app.packageId,
               })
           .toList();
       await NetworkManager.instance.putV3('/v3/api/device/software', {'software': items});
