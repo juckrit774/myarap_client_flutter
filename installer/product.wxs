@@ -1,13 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="MyARAP"
-           Version="1.0.0.24"
+           Version="1.0.0.25"
            Manufacturer="ARSoft Mobile"
            UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
            Scope="perMachine">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- Secure="yes" จำเป็น — ไม่งั้น property จากบรรทัดคำสั่งจะไม่ถูกส่งต่อไปยัง
+         ช่วง elevated ของการติดตั้ง แล้วค่าจะหายไปเงียบ ๆ ตอนติดตั้งผ่าน GPO -->
+    <Property Id="MYARAP_SERVER_URL" Secure="yes" />
 
     <Feature Id="Main" Title="MyARAP" Level="1">
       <ComponentGroupRef Id="AppFiles" />
@@ -48,6 +52,20 @@
     <ComponentGroup Id="MachineRegistry" Directory="INSTALLFOLDER">
       <Component Id="AutoStartRegistry" Guid="*">
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="MyARAP" Type="string" Value="&quot;[INSTALLFOLDER]myarap.exe&quot;" KeyPath="yes" />
+      </Component>
+
+      <!-- ที่อยู่เซิร์ฟเวอร์ที่ผู้ดูแลกำหนดให้ทั้งเครื่อง — agent อ่านค่านี้แล้ว **ล็อกช่องในหน้าตั้งค่า**
+           ตั้งตอนติดตั้ง:  msiexec /i MyARAP.msi MYARAP_SERVER_URL=https://myarap.example
+           (ผ่าน GPO ก็ใส่ property เดียวกันในบรรทัดคำสั่งของ startup script)
+
+           🔴 ทำไมต้องอยู่ที่ HKLM: ของเดิม `server_url` อยู่ใน SharedPreferences ซึ่งผู้ใช้ธรรมดา
+           แก้ได้ → ชี้ agent ไปเซิร์ฟเวอร์ปลอมแล้วส่ง deploy job ของตัวเองเข้ามา = ยกระดับสิทธิ์
+           ผ่าน UAC ที่ดูเหมือนของจริง (AG-SEC-08 / BUG-120)
+
+           ⚠️ ไม่ใส่ property = ไม่เขียนค่า = agent ไม่ล็อก (ยังตั้งเองได้เหมือนเดิม)
+           การล็อกจึงเป็นสิ่งที่ผู้ดูแลเลือกเปิดตอน rollout ไม่ใช่สิ่งที่ทำให้ของเดิมพัง -->
+      <Component Id="ServerUrlRegistry" Guid="*" Condition="MYARAP_SERVER_URL">
+        <RegistryValue Root="HKLM" Key="Software\ARSoft\MyARAP" Name="ServerUrl" Type="string" Value="[MYARAP_SERVER_URL]" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 

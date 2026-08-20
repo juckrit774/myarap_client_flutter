@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../../core/config/app_colors.dart';
 import '../../../../core/config/app_config.dart';
+import '../../../../core/config/managed_config.dart';
 import '../../../../core/services/network_manager.dart';
 import '../../../../core/storage/cache_manager.dart';
 import '../../../../shared/widgets/app_shell.dart';
@@ -38,10 +39,16 @@ class _SettingsSectionState extends State<SettingsSection> {
     super.dispose();
   }
 
+  // ค่าที่ผู้ดูแลตั้งไว้ระดับเครื่อง — ไม่ null = ช่องนี้อ่านอย่างเดียว (AG-SEC-08)
+  String? _managedUrl;
+  bool get _urlLocked => _managedUrl != null;
+
   Future<void> _loadUrl() async {
     final prefs = await SharedPreferences.getInstance();
+    final managed = await ManagedConfig.serverUrl();
     if (mounted) {
-      _urlCtrl.text = prefs.getString('server_url') ?? AppConfig.baseUrl;
+      _managedUrl = managed;
+      _urlCtrl.text = managed ?? prefs.getString('server_url') ?? AppConfig.baseUrl;
       setState(() {});
     }
   }
@@ -169,18 +176,30 @@ class _SettingsSectionState extends State<SettingsSection> {
           const CardTitle('การเชื่อมต่อ'),
           TextField(
             controller: _urlCtrl,
-            style: TextStyle(fontSize: 12.5, color: c.ink),
+            readOnly: _urlLocked,
+            style: TextStyle(fontSize: 12.5, color: _urlLocked ? c.dim : c.ink),
             decoration: appInput(c, AppConfig.baseUrl),
           ),
           const SizedBox(height: 6),
-          Text('ที่อยู่เซิร์ฟเวอร์ MYARAP — เปลี่ยนเมื่อทีม IT แจ้งเท่านั้น',
-              style: TextStyle(fontSize: 11, color: c.dim)),
+          // ล็อกแล้วต้อง**บอกว่าล็อก** ไม่ใช่แค่กดไม่ได้เฉย ๆ ไม่งั้นผู้ใช้จะคิดว่าแอปค้าง
+          if (_urlLocked)
+            Row(children: [
+              Icon(Icons.lock_outline, size: 13, color: c.dim),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text('ผู้ดูแลระบบกำหนดค่านี้ไว้ให้ทั้งเครื่อง — แก้ที่นี่ไม่ได้',
+                    style: TextStyle(fontSize: 11, color: c.dim)),
+              ),
+            ])
+          else
+            Text('ที่อยู่เซิร์ฟเวอร์ MYARAP — เปลี่ยนเมื่อทีม IT แจ้งเท่านั้น',
+                style: TextStyle(fontSize: 11, color: c.dim)),
           const SizedBox(height: 11),
           Row(children: [
             PrimaryButton(
               label: 'บันทึก',
               busy: _saving,
-              onPressed: _saving ? null : _saveUrl,
+              onPressed: (_saving || _urlLocked) ? null : _saveUrl,
             ),
             const SizedBox(width: 8),
             GhostButton(

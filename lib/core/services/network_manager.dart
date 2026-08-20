@@ -1,9 +1,9 @@
 import 'dart:io';
 import 'package:dio/dio.dart';
-import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
+import '../config/managed_config.dart';
 import '../models/base_request_model.dart';
 import '../models/base_response_model.dart';
 import '../storage/cache_manager.dart';
@@ -16,27 +16,66 @@ class NetworkManager {
   static void Function()? onUnauthorized;
 
   NetworkManager._() {
-    (_dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
-      final client = HttpClient();
-      client.badCertificateCallback = (cert, host, port) => true;
-      return client;
-    };
-    _dio.interceptors.add(LogInterceptor(
-      requestBody: true,
-      responseBody: true,
-      logPrint: (o) => debugPrint('[NET] $o'),
-    ));
+    _dio.interceptors.add(_traceInterceptor('NET'));
+    _dioV3.interceptors.add(_traceInterceptor('NET-V3'));
+  }
 
-    (_dioV3.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
-      final client = HttpClient();
-      client.badCertificateCallback = (cert, host, port) => true;
-      return client;
-    };
-    _dioV3.interceptors.add(LogInterceptor(
-      requestBody: true,
-      responseBody: true,
-      logPrint: (o) => debugPrint('[NET-V3] $o'),
-    ));
+  // ── การตรวจใบรับรอง TLS ──────────────────────────────────────────────────
+  //
+  // 🔴 **ห้ามใส่ `badCertificateCallback` กลับมาอีก** (ลบออก 2026-08-20)
+  //
+  // ของเดิมเป็น `(cert, host, port) => true` ทั้ง dio V2 และ V3 = **ยอมรับใบรับรองทุกใบ**
+  // ใครที่อยู่กลางทาง (Wi-Fi องค์กร · ARP spoof · DNS ปลอม) อ่านและแก้ทุกอย่างที่ agent
+  // รับส่งได้ · จุดที่ทำให้ร้ายแรงกว่าปกติคือ **ช่อง SSE เป็นช่องสั่งงาน** — ผู้ที่แทรกกลางทางได้
+  // ยิง event `deploy` ของตัวเองเข้ามาได้ = **สั่งรันโปรแกรมอะไรก็ได้บนทุกเครื่องที่ลง agent**
+  // และ **การตรวจ checksum กันไม่ได้เลย เพราะ checksum มากับ event เดียวกัน**
+  // (ดู `docs/05-testing/agent-security-assessment.md` AG-SEC-06 / BUG-118 ของ MYARAP-NEW)
+  //
+  // ⚠️ **ถ้าใช้ CA ภายในองค์กร**: Dart ไม่ได้อ่าน trust store ของ OS เสมอไป — ต้องแจก root CA
+  // แล้วให้ระบบเชื่อถือจริง ๆ ถ้าเชื่อมไม่ได้จะเห็น `HandshakeException` ใน trace ด้านล่าง
+  // ซึ่งเป็นข้อความที่ตั้งใจให้แยกออกจาก "เน็ตไม่ถึง" ได้ทันที
+  //
+  // ⚠️ deployment ปัจจุบันวิ่ง **HTTP** (`http://<ip>:8088`) ซึ่งไม่แตะ TLS เลย
+  // การลบนี้จึงไม่กระทบของที่ใช้อยู่ — แต่บังคับให้ตอนขึ้น HTTPS ต้องมี cert ที่ถูกต้องจริง
+
+  // ── Trace log ────────────────────────────────────────────────────────────
+  //
+  // 🔴 **ห้าม log body หรือ header** (เปลี่ยนจาก LogInterceptor 2026-08-20)
+  //
+  // ของเดิมเป็น `LogInterceptor(requestBody: true, responseBody: true)` และ `debugPrint`
+  // **ไม่ได้ถูกตัดออกใน release build** → access token · refresh token · เนื้อหา ticket ทั้งหมด
+  // ไหลไปที่ log ของเครื่องผู้ใช้ · ใครอ่าน log เครื่องนั้นได้ = ได้ token ไปใช้ต่อทันที
+  // (AG-SEC-07 / BUG-119)
+  //
+  // ที่เหลือไว้คือ method + path + status + เวลา ซึ่งพอสำหรับตอบคำถามภาคสนามว่า
+  // "ยิงไปถึงไหม / ตอบอะไรกลับมา / ช้าที่ตรงไหน" โดยไม่มีอะไรที่เป็นความลับเลย
+  Interceptor _traceInterceptor(String tag) {
+    return InterceptorsWrapper(
+      onRequest: (options, handler) {
+        options.extra['_t0'] = DateTime.now().millisecondsSinceEpoch;
+        handler.next(options);
+      },
+      onResponse: (r, handler) {
+        debugPrint('[$tag] ${r.requestOptions.method} ${r.requestOptions.path}'
+            ' → ${r.statusCode} ${_took(r.requestOptions)}');
+        handler.next(r);
+      },
+      onError: (e, handler) {
+        // แยก "ใบรับรองไม่ผ่าน" ออกจาก "เน็ตไม่ถึง" ให้ชัด — สองอย่างนี้อาการเหมือนกัน
+        // ตรงที่ request ไม่สำเร็จ แต่คนละสาเหตุและคนละวิธีแก้โดยสิ้นเชิง
+        final cert = e.error is HandshakeException || e.error is CertificateException;
+        debugPrint('[$tag] ${e.requestOptions.method} ${e.requestOptions.path}'
+            ' → ${e.response?.statusCode ?? (cert ? 'TLS ปฏิเสธใบรับรองของเซิร์ฟเวอร์' : e.type.name)}'
+            ' ${_took(e.requestOptions)}');
+        handler.next(e);
+      },
+    );
+  }
+
+  String _took(RequestOptions o) {
+    final t0 = o.extra['_t0'];
+    if (t0 is! int) return '';
+    return '(${DateTime.now().millisecondsSinceEpoch - t0}ms)';
   }
 
   // ── V2 Dio (envelope) ─────────────────────────────────────
@@ -60,7 +99,9 @@ class NetworkManager {
 
   Future<void> updateBaseUrl() async {
     final prefs = await SharedPreferences.getInstance();
-    final url = prefs.getString('server_url') ?? AppConfig.baseUrl;
+    // ค่าที่ผู้ดูแลตั้งไว้ระดับเครื่อง **ชนะเสมอ** — ผู้ใช้ทั่วไปแก้ไม่ได้ (AG-SEC-08)
+    final managed = await ManagedConfig.serverUrl();
+    final url = managed ?? prefs.getString('server_url') ?? AppConfig.baseUrl;
     _dio.options.baseUrl = url;
     _dioV3.options.baseUrl = url;
   }

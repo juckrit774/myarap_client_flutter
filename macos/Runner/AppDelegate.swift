@@ -2,6 +2,7 @@ import Cocoa
 import FlutterMacOS
 import IOKit
 import Metal
+import SystemConfiguration
 
 @main
 class AppDelegate: FlutterAppDelegate {
@@ -187,6 +188,98 @@ class MacDeviceInfo {
       result = String(cString: host)
     }
     return result ?? ""
+  }
+
+
+  /// การ์ดเครือข่ายทั้งหมดที่ใช้งานอยู่ — IPv4 + prefix + MAC ต่อใบ
+  ///
+  /// 🔴 **ต้องเป็น list ต่อ interface ไม่ใช่ค่าเดียว** — `getIPAddress()` เดิมวนทับค่าไปเรื่อย ๆ
+  /// แล้วคืน "ตัวสุดท้ายที่เจอ" เครื่องที่มีทั้งสาย LAN และ Wi-Fi จึงได้ค่าที่ไม่แน่นอนว่าเป็นของใบไหน
+  /// (บทเรียนเดียวกับ `getVolumes()` ที่เดิมส่งไดรฟ์เดียว)
+  ///
+  /// ⚠️ **ไม่เรียก process ภายนอกเลย** — แอปรันใน sandbox (`com.apple.security.app-sandbox`)
+  /// `route`/`ipconfig`/`scutil` จึงเรียกไม่ได้ · gateway ใช้ SystemConfiguration แทน ซึ่ง sandbox อนุญาต
+  ///
+  /// ⚠️ **gateway ได้เฉพาะของ interface หลัก** (SCDynamicStore เก็บ Router ระดับ global ตัวเดียว)
+  /// ใบอื่นจึงคืนค่าว่าง — ฝั่ง MYARAP ไม่ได้ใช้ค่านี้เป็นหลักอยู่แล้วเพราะ gateway เป็นคุณสมบัติของ
+  /// **ซับเน็ต** ไม่ใช่ของเครื่อง
+  private static func getInterfaces() -> [[String: Any]] {
+    // ── MAC ต่อชื่อ interface (มาจาก entry ชนิด AF_LINK คนละ entry กับ AF_INET) ──
+    var macByName: [String: String] = [:]
+    // ── IPv4 + netmask ต่อชื่อ interface ──
+    var ipv4ByName: [String: (ip: String, prefix: Int)] = [:]
+
+    var ifaddr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddr) == 0 else { return [] }
+    defer { freeifaddrs(ifaddr) }
+
+    var ptr = ifaddr
+    while let cur = ptr {
+      defer { ptr = cur.pointee.ifa_next }
+      let iface = cur.pointee
+      let name = String(cString: iface.ifa_name)
+      let flags = Int32(iface.ifa_flags)
+      // ข้ามใบที่ปิดอยู่และ loopback — ไม่ใช่ที่อยู่ที่ใช้สื่อสารกับใครจริง
+      if flags & IFF_UP == 0 || flags & IFF_LOOPBACK != 0 { continue }
+      guard let addr = iface.ifa_addr else { continue }
+
+      switch Int32(addr.pointee.sa_family) {
+      case AF_LINK:
+        // sockaddr_dl — MAC อยู่หลังชื่อ interface ในบัฟเฟอร์เดียวกัน
+        addr.withMemoryRebound(to: sockaddr_dl.self, capacity: 1) { dl in
+          let d = dl.pointee
+          guard d.sdl_alen == 6 else { return }   // เอาเฉพาะ Ethernet/Wi-Fi (6 ไบต์)
+          // 🔴 **ห้ามคัดลอก `sdl_data` ออกมาเป็น tuple แล้วอ่าน** — C ประกาศไว้เป็น `char[12]`
+          // แต่ของจริงเป็น variable-length ที่ยาวเกินขอบเขตนั้น (ชื่อ interface + MAC ต่อกัน)
+          // Swift เห็นเป็น tuple 12 ไบต์ พอชื่อยาวจน `sdl_nlen + 6 > 12` การอ่านจะเกินขอบเขต
+          // → **`Fatal error` ทำให้แอปดับทั้งตัวก่อนได้ส่ง heartbeat** (เจอจริงตอนรันบนเครื่องนี้)
+          // ต้องอ่านจาก pointer ดิบพร้อม offset ซึ่งชี้ไปที่บัฟเฟอร์เต็มของจริง
+          let base = UnsafeRawPointer(dl) + MemoryLayout<sockaddr_dl>.offset(of: \.sdl_data)! + Int(d.sdl_nlen)
+          let bytes = (0..<6).map { base.load(fromByteOffset: $0, as: UInt8.self) }
+          macByName[name] = bytes.map { String(format: "%02x", $0) }.joined(separator: ":")
+        }
+      case AF_INET:
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+        let ip = String(cString: host)
+        // ข้าม link-local (169.254.x) = ที่อยู่ที่เครื่องตั้งเองเพราะหา DHCP ไม่เจอ ไม่ใช่ที่อยู่จริง
+        if ip.hasPrefix("169.254.") { continue }
+        var prefix = 0
+        if let mask = iface.ifa_netmask {
+          mask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { m in
+            prefix = String(UInt32(bigEndian: m.pointee.sin_addr.s_addr), radix: 2)
+              .filter { $0 == "1" }.count
+          }
+        }
+        ipv4ByName[name] = (ip, prefix)
+      default:
+        break
+      }
+    }
+
+    // gateway + interface หลัก จาก SystemConfiguration (ไม่ต้อง spawn process)
+    var router = ""
+    var primary = ""
+    if let store = SCDynamicStoreCreate(nil, "MyARAP" as CFString, nil, nil),
+       let global = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any] {
+      router = global["Router"] as? String ?? ""
+      primary = global["PrimaryInterface"] as? String ?? ""
+    }
+
+    var out: [[String: Any]] = []
+    for (name, v) in ipv4ByName {
+      out.append([
+        "name": name,
+        "ipv4": v.ip,
+        "prefix": v.prefix,
+        "mac": macByName[name] ?? "",
+        "gateway": name == primary ? router : "",
+        "primary": name == primary,
+      ])
+    }
+    // interface หลักมาก่อนเสมอ — ฝั่ง server ใช้ตัวแรกเป็นตัวแทนของเครื่องเมื่อต้องเลือกอันเดียว
+    out.sort { (($0["primary"] as? Bool) == true ? 0 : 1) < (($1["primary"] as? Bool) == true ? 0 : 1) }
+    return out
   }
 
   private static func getStorageCapacity() -> Int {
@@ -435,6 +528,7 @@ class MacDeviceInfo {
         "displays": getDisplays(),
         "gpu":      getGPU(),
         "ipAddress": getIPAddress(),
+      "interfaces": getInterfaces(),
         "applications": getAllApplications(),
         "frontmostApp": frontmostApp
       ]

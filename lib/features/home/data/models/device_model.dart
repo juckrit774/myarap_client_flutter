@@ -23,6 +23,41 @@ class DisplayInfo {
 
 /// 1 พาร์ทิชัน/volume ที่ mount อยู่ — เครื่องหนึ่งมีได้หลายลูก
 /// (Windows: C:, D: … · macOS: /, /Volumes/…)
+/// การ์ดเครือข่าย 1 ใบ — IMPL-16 Phase 1
+///
+/// 🔴 **เก็บเป็น list ต่อใบ ไม่ใช่ค่าเดียวต่อเครื่อง** — `DeviceDetail.ipAddress` เดิมเป็น
+/// "ใบไหนก็ไม่รู้ที่เจอเป็นตัวสุดท้าย" เครื่องที่มีทั้งสาย LAN และ Wi-Fi จึงรายงานค่าไม่แน่นอน
+///
+/// ⚠️ **field ที่ได้ไม่เท่ากันสองแพลตฟอร์ม** — Windows ได้ครบ (gateway/dhcp/dns จาก PowerShell)
+/// ส่วน macOS ได้ name/ipv4/prefix/mac เท่านั้น เพราะแอปรันใน sandbox เรียก `ipconfig`/`scutil` ไม่ได้
+/// (gateway ของใบหลักได้จาก SystemConfiguration) · **ค่าว่างจึงแปลว่า "แพลตฟอร์มนี้ไม่มีให้" ไม่ใช่ "ผิดปกติ"**
+class NetworkInterfaceInfo {
+  final String name;
+  final String ipv4;
+  final int prefix;      // 24 = /24 · 0 = อ่านไม่ได้
+  final String mac;      // รูปแบบดิบตามแพลตฟอร์ม — ฝั่ง server normalize เอง
+  final String gateway;  // ว่างได้ (macOS ได้เฉพาะใบหลัก)
+  final bool dhcp;       // Windows เท่านั้น · macOS = false เสมอ (แยกไม่ได้โดยไม่ spawn process)
+  final List<String> dns;
+  final bool primary;    // ใบที่มี default route
+
+  const NetworkInterfaceInfo({
+    required this.name, required this.ipv4, this.prefix = 0, this.mac = '',
+    this.gateway = '', this.dhcp = false, this.dns = const [], this.primary = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'ipv4': ipv4,
+        if (prefix > 0) 'prefix': prefix,
+        if (mac.isNotEmpty) 'mac': mac,
+        if (gateway.isNotEmpty) 'gateway': gateway,
+        if (dhcp) 'dhcp': true,
+        if (dns.isNotEmpty) 'dns': dns,
+        if (primary) 'primary': true,
+      };
+}
+
 class VolumeInfo {
   final String mount;   // "C:" หรือ "/Volumes/Data"
   final String name;    // ชื่อที่ผู้ใช้ตั้ง
@@ -87,6 +122,32 @@ class ApplicationInfo {
     this.nonRemovable = false,
     this.signatureKind = '',
   });
+}
+
+/// แปลงผลดิบจาก native → NetworkInterfaceInfo
+///
+/// ⚠️ **ทิ้งใบที่ไม่มี IPv4** — ใบที่เสียบสายไว้แต่ยังไม่ได้ที่อยู่ไม่ได้ให้ข้อมูลอะไรกับทะเบียนไอพี
+List<NetworkInterfaceInfo> _parseInterfaces(dynamic raw) {
+  if (raw is! List) return const [];
+  final out = <NetworkInterfaceInfo>[];
+  for (final e in raw) {
+    if (e is! Map) continue;
+    final m = e.cast<String, dynamic>();
+    final ip = (m['ipv4'] as String? ?? '').trim();
+    if (ip.isEmpty) continue;
+    final rawDns = m['dns'];
+    out.add(NetworkInterfaceInfo(
+      name: m['name'] as String? ?? '',
+      ipv4: ip,
+      prefix: (m['prefix'] as num?)?.toInt() ?? 0,
+      mac: (m['mac'] as String? ?? '').trim(),
+      gateway: (m['gateway'] as String? ?? '').trim(),
+      dhcp: m['dhcp'] == true,
+      dns: rawDns is List ? rawDns.whereType<String>().where((d) => d.isNotEmpty).toList() : const [],
+      primary: m['primary'] == true,
+    ));
+  }
+  return out;
 }
 
 List<VolumeInfo> _parseVolumes(dynamic raw) {
@@ -165,6 +226,7 @@ class DeviceDetail {
   // Applications
   final List<ApplicationInfo> applications;
   final List<VolumeInfo> volumes;
+  final List<NetworkInterfaceInfo> interfaces;
 
   // Active app (macOS: NSWorkspace frontmostApplication)
   final String frontmostApp;
@@ -205,6 +267,7 @@ class DeviceDetail {
     required this.displaysDetail,
     required this.applications,
     this.volumes = const [],
+    this.interfaces = const [],
     this.frontmostApp = '',
   });
 
@@ -332,6 +395,7 @@ class DeviceDetail {
       displaysDetail: displays,
       applications: apps,
       volumes: _parseVolumes(m['volumes']),
+      interfaces: _parseInterfaces(m['interfaces']),
       frontmostApp: s('frontmostApp'),
     );
   }
@@ -424,6 +488,7 @@ class DeviceDetail {
       displaysDetail: displays,
       applications: applications,
       volumes: _parseVolumes(info['volumes']),
+      interfaces: _parseInterfaces(info['interfaces']),
     );
   }
 
@@ -483,6 +548,34 @@ $vols = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction S
       boot  = ($_.DeviceID -eq $env:SystemDrive)
     }
   })
+
+# ── การ์ดเครือข่ายทุกใบที่ใช้งานอยู่ (IMPL-16 Phase 1) ──
+# 🔴 เป็น list ต่อ interface ไม่ใช่ค่าเดียว — $ip ด้านบนเอา "ใบแรกที่เจอ" ซึ่งไม่แน่นอนว่าเป็น
+# สาย LAN หรือ Wi-Fi บนเครื่องที่มีทั้งสองอย่าง (บทเรียนเดียวกับ $vols ที่เดิมส่งไดรฟ์เดียว)
+# ⚠️ ต้องกรอง 127.* และ 169.254.* ออก — link-local คือที่อยู่ที่เครื่องตั้งเองตอนหา DHCP ไม่เจอ
+$ifs = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+  Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+  ForEach-Object {
+    $ipRow = $_
+    $ad = Get-NetAdapter -InterfaceIndex $ipRow.InterfaceIndex -ErrorAction SilentlyContinue
+    # gateway ของ interface ใบนั้นโดยเฉพาะ (ไม่ใช่ default route ของทั้งเครื่อง)
+    $gw = (Get-NetRoute -InterfaceIndex $ipRow.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+           Select-Object -First 1).NextHop
+    $dns = @(Get-DnsClientServerAddress -InterfaceIndex $ipRow.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+             Select-Object -ExpandProperty ServerAddresses)
+    @{
+      name     = if ($ad) { $ad.Name } else { $ipRow.InterfaceAlias }
+      ipv4     = $ipRow.IPAddress
+      prefix   = [int]$ipRow.PrefixLength
+      mac      = if ($ad -and $ad.MacAddress) { $ad.MacAddress } else { '' }
+      gateway  = if ($gw) { $gw } else { '' }
+      # PrefixOrigin = Dhcp เมื่อที่อยู่มาจาก DHCP · Manual = ตั้งเอง (static)
+      dhcp     = ($ipRow.PrefixOrigin -eq 'Dhcp')
+      dns      = $dns
+      # ใบที่มี default route = ใบหลักที่ใช้ออกอินเทอร์เน็ตจริง
+      primary  = [bool]$gw
+    }
+  } | Sort-Object { -[int]$_.primary })
 
 $bootTime = $os.LastBootUpTime
 $uptime = (Get-Date) - $bootTime
@@ -616,6 +709,7 @@ $apps += @(Get-AppxPackage -ErrorAction SilentlyContinue |
   ipAddress       = $ip
   displays        = $displays
   volumes         = $vols
+  interfaces      = $ifs
   applications    = $apps
 } | ConvertTo-Json -Depth 4
 ''';

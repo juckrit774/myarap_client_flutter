@@ -1924,6 +1924,14 @@ $bmp.Save($ms, $enc, $ep)
         'resolutionY': disp.resolutionY,
         'builtin':     disp.builtin,
       }).toList(),
+      // Network interfaces — array of {name,ipv4,prefix,mac,gateway,dhcp,dns,primary}
+      //
+      // 🔴 **key ใหม่แบบ optional** (IMPL-16 Phase 1) — agent รุ่นเก่าไม่ส่ง key นี้ contract เดิมจึงไม่พัง
+      // ตามกฎข้อ 1 ของโปรเจกต์ · backend ที่ไม่รู้จัก key นี้ก็เก็บลง attributes เฉย ๆ ไม่ error
+      //
+      // ⚠️ **ไม่ส่ง `ipAddress`/`macAddress` เป็นค่าเดี่ยว** — ทั้งสองช่องนั้นเป็นของทะเบียน IPAM แล้ว
+      // (`owner: 'ipam'`) ถ้า agent ส่งมาทับจะกลายเป็นสองแหล่งความจริงที่ทับกันไปมาทุก heartbeat
+      'interfaces': d.interfaces.map((n) => n.toJson()).toList(),
       // agent
       'agentVersion': AppConfig.agentVersion, // single source — bump ที่ app_config.dart ที่เดียว
       // active app (macOS EventChannel; ว่างบน Windows)
