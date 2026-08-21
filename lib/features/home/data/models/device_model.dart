@@ -33,6 +33,12 @@ class DisplayInfo {
 /// (gateway ของใบหลักได้จาก SystemConfiguration) · **ค่าว่างจึงแปลว่า "แพลตฟอร์มนี้ไม่มีให้" ไม่ใช่ "ผิดปกติ"**
 class NetworkInterfaceInfo {
   final String name;
+  /// ชนิดการ์ด: `lan` | `wifi` | `other`
+  ///
+  /// 🔴 **ต้องมาจากระบบปฏิบัติการ ห้ามเดาจากชื่อ** — บน macOS ชื่อเป็น `en0`/`en1` ซึ่งเป็น
+  /// Wi-Fi บนเครื่องหนึ่งและเป็นสายบนอีกเครื่องหนึ่ง · MYARAP ใช้ค่านี้เลือกว่าเบอร์ไหนคือ
+  /// "IP ของเครื่อง" เวลาต้องแสดงเบอร์เดียว (สายมาก่อน Wi-Fi)
+  final String kind;
   final String ipv4;
   final int prefix;      // 24 = /24 · 0 = อ่านไม่ได้
   final String mac;      // รูปแบบดิบตามแพลตฟอร์ม — ฝั่ง server normalize เอง
@@ -42,12 +48,13 @@ class NetworkInterfaceInfo {
   final bool primary;    // ใบที่มี default route
 
   const NetworkInterfaceInfo({
-    required this.name, required this.ipv4, this.prefix = 0, this.mac = '',
+    required this.name, required this.ipv4, this.kind = 'other', this.prefix = 0, this.mac = '',
     this.gateway = '', this.dhcp = false, this.dns = const [], this.primary = false,
   });
 
   Map<String, dynamic> toJson() => {
         'name': name,
+        if (kind.isNotEmpty) 'kind': kind,
         'ipv4': ipv4,
         if (prefix > 0) 'prefix': prefix,
         if (mac.isNotEmpty) 'mac': mac,
@@ -139,6 +146,7 @@ List<NetworkInterfaceInfo> _parseInterfaces(dynamic raw) {
     out.add(NetworkInterfaceInfo(
       name: m['name'] as String? ?? '',
       ipv4: ip,
+      kind: (m['kind'] as String? ?? 'other').trim(),
       prefix: (m['prefix'] as num?)?.toInt() ?? 0,
       mac: (m['mac'] as String? ?? '').trim(),
       gateway: (m['gateway'] as String? ?? '').trim(),
@@ -565,6 +573,11 @@ $ifs = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
              Select-Object -ExpandProperty ServerAddresses)
     @{
       name     = if ($ad) { $ad.Name } else { $ipRow.InterfaceAlias }
+      # ชนิดการ์ดจาก PhysicalMediaType ของ Windows เอง — ไม่เดาจากชื่อ
+      # ("Native 802.11"/"Wireless WAN" = ไร้สาย · "802.3" = สาย)
+      kind     = if ($ad -and $ad.PhysicalMediaType -match '802\.11|Wireless') { 'wifi' }
+                 elseif ($ad -and $ad.PhysicalMediaType -match '802\.3') { 'lan' }
+                 else { 'other' }
       ipv4     = $ipRow.IPAddress
       prefix   = [int]$ipRow.PrefixLength
       mac      = if ($ad -and $ad.MacAddress) { $ad.MacAddress } else { '' }

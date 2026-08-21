@@ -257,6 +257,24 @@ class MacDeviceInfo {
       }
     }
 
+    // ── ชนิดของการ์ด (สาย/ไร้สาย) ──
+    //
+    // 🔴 **ชื่อ BSD บอกไม่ได้เลยว่าเป็นอะไร** — `en0` เป็น Wi-Fi บน MacBook แต่เป็นสายบน Mac ตั้งโต๊ะ
+    // เดาจากชื่อจะสลับกันแบบเงียบ ๆ บนเครื่องครึ่งหนึ่ง · SCNetworkInterface บอกชนิดจริงและ
+    // sandbox เรียกได้ (อ่าน config ของระบบ ไม่ได้ spawn process)
+    var kindByName: [String: String] = [:]
+    if let all = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] {
+      for ni in all {
+        guard let bsd = SCNetworkInterfaceGetBSDName(ni) as String?,
+              let type = SCNetworkInterfaceGetInterfaceType(ni) as String? else { continue }
+        switch type {
+        case kSCNetworkInterfaceTypeIEEE80211 as String: kindByName[bsd] = "wifi"
+        case kSCNetworkInterfaceTypeEthernet as String:  kindByName[bsd] = "lan"
+        default: kindByName[bsd] = "other"
+        }
+      }
+    }
+
     // gateway + interface หลัก จาก SystemConfiguration (ไม่ต้อง spawn process)
     var router = ""
     var primary = ""
@@ -270,6 +288,7 @@ class MacDeviceInfo {
     for (name, v) in ipv4ByName {
       out.append([
         "name": name,
+        "kind": kindByName[name] ?? "other",
         "ipv4": v.ip,
         "prefix": v.prefix,
         "mac": macByName[name] ?? "",
