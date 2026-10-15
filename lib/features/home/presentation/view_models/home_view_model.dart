@@ -12,6 +12,7 @@ import '../../../auth/models/login_response_model.dart';
 import '../../../../core/services/network_manager.dart';
 import '../../../../core/storage/cache_manager.dart';
 import '../../../../core/services/remote_input_windows.dart';
+import '../../../../core/services/startup_log.dart';
 
 // heartbeat interval เมื่อ V3 ไม่ส่ง dueDateTime กลับมา
 const _kHeartbeatInterval = Duration(minutes: 10);
@@ -136,9 +137,10 @@ class HomeViewModel extends ChangeNotifier {
     errorMessage = null;
     notifyListeners();
 
+    StartupLog.log('init:begin');
     await Future.wait([
-      _loadCachedAuth(),
-      _loadDeviceInfo(),
+      StartupLog.trace('init:loadCachedAuth', _loadCachedAuth),
+      StartupLog.trace('init:loadDeviceInfo', _loadDeviceInfo),
     ]);
 
     // เริ่ม USB guard "ก่อน" authenticate เสมอ — เพราะ _authenticate() ยิง heartbeat แรกทันที
@@ -151,7 +153,7 @@ class HomeViewModel extends ChangeNotifier {
     if (Platform.isMacOS) _listenRemoteEvents();
     if (Platform.isWindows) _listenWindowsRemoteStop();
 
-    await _authenticate();
+    await StartupLog.trace('init:authenticate', _authenticate);
 
     // ต่อ SSE policy stream ค้างไว้ — backend push allowUsb ทันทีที่ admin toggle
     // (heartbeat 10 นาทียังทำงานเป็น fallback sync ตามเดิม)
@@ -166,6 +168,7 @@ class HomeViewModel extends ChangeNotifier {
 
     isLoading = false;
     notifyListeners();
+    StartupLog.log('init:done');
   }
 
   Future<void> _loadCachedAuth() async {
@@ -323,11 +326,11 @@ if ($p) {
 }
 ''';
       try {
-        final proc = await Process.run(
+        final proc = await StartupLog.trace('ps:foregroundApp', () => Process.run(
           'powershell',
           _psArgs(script, hidden: true),
           stdoutEncoding: const SystemEncoding(),
-        );
+        ));
         final app = proc.stdout.toString().trim();
         if (app.isNotEmpty && app != _lastSentApp) {
           _lastSentApp = app;
@@ -444,11 +447,11 @@ Get-CimInstance Win32_LogicalDisk -Filter "DriveType=2" | ForEach-Object { "$($_
 ''';
     _usbPollTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
       try {
-        final proc = await Process.run(
+        final proc = await StartupLog.trace('ps:usbPoll', () => Process.run(
           'powershell',
           _psArgs(script, hidden: true),
           stdoutEncoding: const SystemEncoding(),
-        );
+        ));
         final lines = proc.stdout
             .toString()
             .split('\n')
@@ -703,8 +706,8 @@ try {
 }
 ''';
     }
-    final proc = await Process.run('powershell', _psArgs(script),
-        stdoutEncoding: const SystemEncoding());
+    final proc = await StartupLog.trace('ps:deploy', () => Process.run('powershell', _psArgs(script),
+        stdoutEncoding: const SystemEncoding()));
     try {
       final out = Map<String, dynamic>.from(jsonDecode(proc.stdout.toString().trim()) as Map);
       final code = out['code'] as int? ?? -1;
@@ -1074,8 +1077,8 @@ $result = @{
 if ($lat -ne $null -and $lng -ne $null) { $result.lat = $lat; $result.lng = $lng }
 $result | ConvertTo-Json -Compress -Depth 4
 ''';
-    final proc = await Process.run('powershell', _psArgs(script, hidden: true),
-        stdoutEncoding: const SystemEncoding());
+    final proc = await StartupLog.trace('ps:metrics', () => Process.run('powershell', _psArgs(script, hidden: true),
+        stdoutEncoding: const SystemEncoding()));
     final out = proc.stdout.toString().trim();
     final parsed = Map<String, dynamic>.from(jsonDecode(out) as Map);
     final onAC = parsed.remove('onAC') == true;

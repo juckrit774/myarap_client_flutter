@@ -6,6 +6,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'core/config/app_colors.dart';
 import 'core/config/app_config.dart';
 import 'core/services/network_manager.dart';
+import 'core/services/startup_log.dart';
 import 'core/storage/cache_manager.dart';
 import 'features/home/presentation/screens/home_screen.dart';
 import 'shared/widgets/app_shell.dart';
@@ -14,17 +15,22 @@ final _navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // log ช่วงเปิดโปรแกรม → %TEMP%\myarap-startup.log (ไล่อาการ Not Responding บน Windows)
+  StartupLog.init();
   // ต้องมาก่อน updateBaseUrl — heartbeat แรกส่ง agentVersion ไปด้วย ถ้ายังไม่ init
   // จะรายงานค่าว่างให้ backend แล้วหน้า Hardware จะโชว์ '-' จนกว่าจะ heartbeat รอบถัดไป
-  await AppConfig.init();
-  await NetworkManager.instance.updateBaseUrl();
+  await StartupLog.trace('main:AppConfig.init', AppConfig.init);
+  StartupLog.log('version=${AppConfig.appVersion}');
+  await StartupLog.trace('main:updateBaseUrl', NetworkManager.instance.updateBaseUrl);
 
   // Windows: กด X → ย่อลง system tray (mini bar) แทนปิดโปรแกรม (agent ต้องรันต่อเนื่อง)
   // macOS มี behavior นี้อยู่แล้วผ่าน NSStatusBar + custom close() ใน MainFlutterWindow.swift
   if (Platform.isWindows) {
-    await windowManager.ensureInitialized();
-    await windowManager.setPreventClose(true); // ดัก close (ปุ่ม X) เพื่อ hide แทน quit
-    await _setupTray();
+    await StartupLog.trace('main:windowManager', () async {
+      await windowManager.ensureInitialized();
+      await windowManager.setPreventClose(true); // ดัก close (ปุ่ม X) เพื่อ hide แทน quit
+    });
+    await StartupLog.trace('main:tray', _setupTray);
   }
 
   NetworkManager.onUnauthorized = () {
@@ -36,6 +42,7 @@ void main() async {
     });
   };
 
+  StartupLog.log('main:runApp');
   runApp(const MyarapApp());
 }
 

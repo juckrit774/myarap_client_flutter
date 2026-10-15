@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
+import '../../../../core/services/startup_log.dart';
 
 class DisplayInfo {
   final String name;
@@ -728,13 +729,13 @@ $apps += @(Get-AppxPackage -ErrorAction SilentlyContinue |
 ''';
 
     try {
-      final proc = await Process.run(
+      final proc = await StartupLog.trace('ps:deviceInfo', () => Process.run(
         'powershell',
         ['-NoProfile', '-NonInteractive', '-Command', script],
         runInShell: false,
         stdoutEncoding: utf8,
         stderrEncoding: utf8,
-      );
+      ));
       final output = proc.stdout.toString().trim();
       if (output.isEmpty) return {};
       final clean = output.startsWith('﻿') ? output.substring(1) : output;
