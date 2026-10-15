@@ -961,7 +961,13 @@ if ($net) {
 # message queue ของ thread เดียวกันถึงจะ complete ได้ แต่ .Wait() บล็อก thread นั้นเอง
 # → ติด deadlock จนครบ timeout ทุกครั้ง (ไม่ fault, ไม่ throw — แค่ไม่มีวัน complete)
 # แก้ด้วย poll ผ่าน DoEvents() แทน (ให้ message pump ทำงานต่อระหว่างรอ)
+#
+# 🔴 ครบ timeout แล้วต้อง Cancel() + รอให้ยกเลิกเสร็จก่อนสคริปต์จบ (แก้ 1.0.0.27)
+# ของเดิมปล่อย operation ค้างแล้วจบโปรเซสเลย → ผลของ WinRT ย้อนกลับเข้ามาตอน CLR กำลังปิด
+# → powershell.exe ล้มด้วย 0xE0434352 + กล่อง "Application Error" เด้งบนจอผู้ใช้
+# (เกิดบ่อยบนเครื่องตั้งโต๊ะไม่มี Wi-Fi ที่หาตำแหน่งไม่ทันใน 10 วินาที — สคริปต์นี้รันทุก 5 นาที)
 $lat = $null; $lng = $null
+$op = $null; $task = $null
 try {
   Add-Type -AssemblyName System.Runtime.WindowsRuntime
   [Windows.Devices.Geolocation.Geolocator,Windows.Devices.Geolocation,ContentType=WindowsRuntime] | Out-Null
@@ -981,6 +987,22 @@ try {
     $lng = [math]::Round($pos.Coordinate.Point.Position.Longitude, 6)
   }
 } catch { $lat = $null; $lng = $null }
+finally {
+  # ยังไม่เสร็จ (timeout หรือ throw กลางทาง) → สั่งยกเลิกแล้ว pump ต่อให้ task จบจริง
+  try {
+    if ($op -ne $null -and ($task -eq $null -or -not $task.IsCompleted)) {
+      $op.Cancel()
+      $cancelDeadline = (Get-Date).AddSeconds(3)
+      while ($task -ne $null -and -not $task.IsCompleted -and (Get-Date) -lt $cancelDeadline) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 50
+      }
+    }
+    # observe exception ของ task ที่ fault/cancel ไว้ ไม่ให้เหลือเป็น unobserved
+    if ($task -ne $null -and $task.IsCompleted) { $null = $task.Exception }
+    if ($op -ne $null) { $op.Close() }
+  } catch {}
+}
 
 $power = [System.Windows.Forms.SystemInformation]::PowerStatus
 $hasBattery = -not ([int]$power.BatteryChargeStatus -band 128)   # 128 = NoSystemBattery
